@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claudewatch"
+version = "0.1.0"
+description = "macOS menubar app showing Claude Code rate limits and session status"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "Hendrick Melo" }]
+keywords = ["claude", "claude-code", "menubar", "macos", "rate-limit"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: MacOS X",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "rumps>=0.4.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/hendrickmelo/claudewatch"
+Repository = "https://github.com/hendrickmelo/claudewatch"
+Issues = "https://github.com/hendrickmelo/claudewatch/issues"
+
+[project.scripts]
+claudewatch = "claudewatch.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+claudewatch = ["statusline_hook.sh"]
