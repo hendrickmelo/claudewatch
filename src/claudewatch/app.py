@@ -2,6 +2,9 @@
 
 import json
 import os
+import subprocess
+import urllib.request
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,6 +16,67 @@ STATUS_DIR = CLAUDE_DIR / "status"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 
 POLL_INTERVAL = 5  # seconds
+API_POLL_INTERVAL = 600  # 10 minutes — conservative to avoid 429s
+API_STALE_THRESHOLD = 300  # only poll API if no status update in 5 minutes
+
+
+def fetch_oauth_usage() -> dict | None:
+    """Fetch rate limit usage from the Anthropic OAuth API.
+
+    Returns a dict compatible with the rate_limits format in status files,
+    or None if the request fails (429, auth error, etc.).
+    """
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+
+        creds = json.loads(result.stdout)
+        token = creds.get("claudeAiOauth", {}).get("accessToken")
+        if not token:
+            return None
+
+        req = urllib.request.Request(
+            "https://api.anthropic.com/api/oauth/usage",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "anthropic-beta": "oauth-2025-04-20",
+            },
+        )
+        resp = urllib.request.urlopen(req, timeout=10)
+        data = json.loads(resp.read())
+
+        # Convert to the same format as status file rate_limits
+        five_hour = data.get("five_hour", {})
+        seven_day = data.get("seven_day", {})
+
+        def parse_reset(iso_str: str) -> int:
+            """Convert ISO timestamp to unix epoch."""
+            try:
+                dt = datetime.fromisoformat(iso_str)
+                return int(dt.timestamp())
+            except (ValueError, TypeError):
+                return 0
+
+        return {
+            "rate_limits": {
+                "five_hour": {
+                    "used_percentage": int(five_hour.get("utilization", 0)),
+                    "resets_at": parse_reset(five_hour.get("resets_at", "")),
+                },
+                "seven_day": {
+                    "used_percentage": int(seven_day.get("utilization", 0)),
+                    "resets_at": parse_reset(seven_day.get("resets_at", "")),
+                },
+            },
+            "_source": "oauth_api",
+        }
+    except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError,
+            subprocess.TimeoutExpired, KeyError, OSError):
+        return None
 
 
 def pid_alive(pid: int) -> bool:
@@ -218,6 +282,8 @@ class ClaudeWatchApp(rumps.App):
 
         self._last_window_start = 0.0
         self._session_keys: list[str] = []
+        self._last_api_poll = 0.0
+        self._api_rate_limits: dict | None = None
 
         self.rate_5h = rumps.MenuItem("5-hour: --", callback=None)
         self.rate_7d = rumps.MenuItem("7-day: --", callback=None)
@@ -275,6 +341,23 @@ class ClaudeWatchApp(rumps.App):
         latest = max(recent_statuses, key=lambda s: s["_mtime"]) if recent_statuses else (
             max(all_statuses, key=lambda s: s["_mtime"]) if all_statuses else None
         )
+
+        # Poll OAuth API if status files are stale
+        latest_status_age = now - latest["_mtime"] if latest else float("inf")
+        if (latest_status_age > API_STALE_THRESHOLD
+                and now - self._last_api_poll > API_POLL_INTERVAL):
+            api_data = fetch_oauth_usage()
+            if api_data:
+                api_data["_mtime"] = now
+                api_data["_session_id"] = "_api"
+                self._api_rate_limits = api_data
+                self._last_api_poll = now
+
+        # Use API data if it's more recent than status files
+        if self._api_rate_limits:
+            api_mtime = self._api_rate_limits.get("_mtime", 0)
+            if not latest or api_mtime > latest["_mtime"]:
+                latest = self._api_rate_limits
 
         # Per-session statuses: only for alive sessions within the window
         sessions = get_active_sessions()
@@ -421,19 +504,13 @@ class ClaudeWatchApp(rumps.App):
                 # Transcript-only data (e.g., T3/sdk-ts sessions)
                 model = transcript.get("model", "?")
                 age = now - transcript["_transcript_mtime"]
-                ctx_tokens = (
-                    transcript.get("input_tokens", 0)
-                    + transcript.get("cache_read", 0)
-                    + transcript.get("cache_creation", 0)
-                )
                 out_tokens = transcript.get("output_tokens", 0)
-                label = f"{ep_icon} {name}  {format_tokens(ctx_tokens)}\u2191 {format_tokens(out_tokens)}\u2193"
+                label = f"{ep_icon} {name}  {format_tokens(out_tokens)}\u2193"
 
                 submenu = rumps.MenuItem(label)
                 details = [
                     f"Model: {model}",
-                    f"Context: ~{format_tokens(ctx_tokens)} tokens",
-                    f"Output: {format_tokens(out_tokens)} tokens",
+                    f"Output: {format_tokens(out_tokens)} tokens (last msg)",
                     f"Dir: {session.get('cwd', '?')}",
                     f"Last active: {format_time_ago(age)}",
                 ]
