@@ -136,16 +136,43 @@ def format_time_ago(seconds: float) -> str:
     return f"{hours // 24}d ago"
 
 
-def status_icon(used_pct: int) -> str:
-    """Return a colored circle emoji based on usage percentage."""
+def status_icon(used_pct: int, resets_at: float = 0, now: float = 0) -> str:
+    """Return a colored circle based on smart burn-rate projection.
+
+    If we have timing data, projects whether the current burn rate will
+    exhaust the quota before the window resets. Falls back to fixed
+    thresholds if timing data is unavailable.
+    """
+    # Always green under 30%
     if used_pct < 30:
-        return "\U0001f7e2"  # green circle
-    elif used_pct < 70:
-        return "\U0001f7e1"  # yellow circle
-    elif used_pct < 90:
-        return "\U0001f7e0"  # orange circle
+        return "\U0001f7e2"
+
+    if resets_at and now:
+        window_duration = 5 * 3600
+        window_start = resets_at - window_duration
+        time_elapsed = now - window_start
+        time_remaining = resets_at - now
+
+        if time_elapsed > 60 and time_remaining > 0:
+            burn_rate = used_pct / time_elapsed          # % per second
+            projected = used_pct + burn_rate * time_remaining
+
+            if projected < 80:
+                return "\U0001f7e2"   # green — on track
+            elif projected < 100:
+                return "\U0001f7e1"   # yellow — might get close
+            elif projected < 130:
+                return "\U0001f7e0"   # orange — likely to hit limit
+            else:
+                return "\U0001f534"   # red — well over
+
+    # Fallback: no timing data
+    if used_pct < 60:
+        return "\U0001f7e1"
+    elif used_pct < 85:
+        return "\U0001f7e0"
     else:
-        return "\U0001f534"  # red circle
+        return "\U0001f534"
 
 
 def format_tokens(tokens: int) -> str:
@@ -362,8 +389,8 @@ class ClaudeWatchApp(rumps.App):
 
         self._last_window_start = 0.0
         self._session_keys: list[str] = []
-        self._last_api_poll = self._load_api_poll_time()
-        self._api_rate_limits: dict | None = None
+        self._api_rate_limits: dict | None = self._load_api_cache()
+        self._last_api_poll = 0.0  # always fetch fresh data on startup
 
         self.rate_5h = rumps.MenuItem("5-hour: --", callback=None)
         self.rate_7d = rumps.MenuItem("7-day: --", callback=None)
@@ -390,9 +417,10 @@ class ClaudeWatchApp(rumps.App):
         self.timer.start()
 
     _API_POLL_CACHE = CLAUDE_DIR / "claudewatch-api-poll.txt"
+    _API_DATA_CACHE = CLAUDE_DIR / "claudewatch-api-cache.json"
 
     def _load_api_poll_time(self) -> float:
-        """Load the last API poll timestamp from disk (survives restarts)."""
+        """Load the last API poll timestamp from disk."""
         try:
             return float(self._API_POLL_CACHE.read_text().strip())
         except (OSError, ValueError):
@@ -402,6 +430,20 @@ class ClaudeWatchApp(rumps.App):
         """Persist the last API poll timestamp to disk."""
         try:
             self._API_POLL_CACHE.write_text(str(ts))
+        except OSError:
+            pass
+
+    def _load_api_cache(self) -> dict | None:
+        """Load cached API rate limit data from disk."""
+        try:
+            return json.loads(self._API_DATA_CACHE.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def _save_api_cache(self, data: dict):
+        """Persist API rate limit data to disk."""
+        try:
+            self._API_DATA_CACHE.write_text(json.dumps(data))
         except OSError:
             pass
 
@@ -455,6 +497,7 @@ class ClaudeWatchApp(rumps.App):
                 self._api_rate_limits = api_data
                 self._last_api_poll = now
                 self._save_api_poll_time(now)
+                self._save_api_cache(api_data)
                 latest = api_data
 
         # Per-session statuses: only for alive sessions within the window
@@ -495,7 +538,7 @@ class ClaudeWatchApp(rumps.App):
         countdown_7d = max(0, resets_at_7d - now)
 
         # Menubar title
-        icon = status_icon(used_5h)
+        icon = status_icon(used_5h, resets_at_5h, now)
         self.title = f"{icon}{used_5h}% \u21bb{format_countdown(countdown_5h)}"
 
         # Dropdown items
