@@ -17,7 +17,7 @@ STATUS_DIR = CLAUDE_DIR / "status"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 
 POLL_INTERVAL = 5  # seconds
-API_POLL_INTERVAL = 180  # 3 minutes
+API_POLL_INTERVAL = 60  # 1 minute
 API_STALE_THRESHOLD = 300  # only poll API if no status update in 5 minutes
 API_LOG = Path.home() / ".claude" / "claudewatch-api.log"
 
@@ -486,10 +486,15 @@ class ClaudeWatchApp(rumps.App):
             if not latest or api_mtime > latest["_mtime"]:
                 latest = self._api_rate_limits
 
-        # Poll OAuth API if best available data is stale
+        # Poll OAuth API if:
+        # - user manually clicked Refresh Now
+        # - startup (last_api_poll == 0, always get fresh data regardless of cache age)
+        # - data is stale AND interval has passed
+        force = sender is not None and not isinstance(sender, rumps.Timer)
+        is_startup = self._last_api_poll == 0.0
         latest_age = now - latest["_mtime"] if latest else float("inf")
-        if (latest_age > API_STALE_THRESHOLD
-                and now - self._last_api_poll > API_POLL_INTERVAL):
+        if (force or is_startup or (latest_age > API_STALE_THRESHOLD
+                                    and now - self._last_api_poll > API_POLL_INTERVAL)):
             api_data = fetch_oauth_usage()
             if api_data:
                 api_data["_mtime"] = now
@@ -591,66 +596,75 @@ class ClaudeWatchApp(rumps.App):
             elif started_at >= cutoff_24h:
                 recent.append(session)
 
-        self.sessions_header.title = f"Active Sessions ({len(active)})"
-        self.recent_header.title = f"Recent Sessions ({len(recent)})" if recent else "Recent Sessions"
-
         ep_icons = {
             "cli": "\U0001f4bb",
             "claude-vscode": "\U0001f5a5\ufe0f",
             "sdk-ts": "\u2699\ufe0f",
         }
 
-        # Add active sessions
-        for session in sorted(active, key=lambda s: s.get("startedAt", 0), reverse=True):
+        def session_last_active(s: dict) -> float:
+            sid = s.get("sessionId", "")
+            t = transcript_info.get(sid)
+            st = status_by_id.get(sid)
+            times = []
+            if t: times.append(t.get("_transcript_mtime", 0))
+            if st: times.append(st.get("_mtime", 0))
+            return max(times) if times else s.get("startedAt", 0) / 1000
+
+        def thread_label_for(session: dict) -> str:
+            """Get the T3 thread title for a session, or fall back to token/ctx info."""
             sid = session.get("sessionId", "")
-            name = session.get("name") or short_project_name(session.get("cwd", "?"))
+            threads = t3_threads.get(sid, [])
+            if threads:
+                return threads[0].get("title", "Untitled")
+            # Fall back to data-based label
+            status = status_by_id.get(sid)
+            transcript = transcript_info.get(sid)
+            if status:
+                ctx_pct = status.get("context_window", {}).get("used_percentage", "?")
+                total_cost = status.get("cost", {}).get("total_cost_usd", 0)
+                cost_str = f"  ${total_cost:.2f}" if total_cost else ""
+                return f"ctx:{ctx_pct}%{cost_str}"
+            elif transcript:
+                out_tokens = transcript.get("output_tokens", 0)
+                return f"{format_tokens(out_tokens)}\u2193"
+            return session.get("sessionId", "?")[:8]
+
+        def build_session_submenu(session: dict, label: str | None = None) -> rumps.MenuItem | None:
+            """Build a session/thread submenu item. Returns None if no data."""
+            sid = session.get("sessionId", "")
             status = status_by_id.get(sid)
             transcript = transcript_info.get(sid)
             entrypoint = session.get("entrypoint", "?")
             ep_icon = ep_icons.get(entrypoint, "\u2022")
 
+            title = label or thread_label_for(session)
+            item_label = f"{ep_icon} {title}"
+
             if status:
-                # Full status from statusline hook
-                ctx_pct = status.get("context_window", {}).get("used_percentage", "?")
                 model = status.get("model", {}).get("display_name", "?")
+                ctx_pct = status.get("context_window", {}).get("used_percentage", "?")
                 age = now - status["_mtime"]
-                total_cost = status.get("cost", {}).get("total_cost_usd", 0)
-                cost_str = f"  ${total_cost:.2f}" if total_cost else ""
-                label = f"{ep_icon} {name}  ctx:{ctx_pct}%{cost_str}"
-
-                submenu = rumps.MenuItem(label)
-                details = [
-                    f"Model: {model}",
-                    f"Context: {ctx_pct}% used",
-                ]
-
+                item = rumps.MenuItem(item_label)
+                details = [f"Model: {model}", f"Context: {ctx_pct}% used"]
                 ctx = status.get("context_window", {})
-                window_size = ctx.get("context_window_size", 0)
-                if window_size:
-                    details.append(f"Window: {window_size // 1000}K tokens")
-
+                if ctx.get("context_window_size"):
+                    details.append(f"Window: {ctx['context_window_size'] // 1000}K tokens")
                 cost = status.get("cost", {})
-                total_cost = cost.get("total_cost_usd", 0)
-                if total_cost:
-                    details.append(f"Cost: ${total_cost:.2f}")
-
+                if cost.get("total_cost_usd"):
+                    details.append(f"Cost: ${cost['total_cost_usd']:.2f}")
                 lines_added = cost.get("total_lines_added", 0)
                 lines_removed = cost.get("total_lines_removed", 0)
                 if lines_added or lines_removed:
                     details.append(f"Lines: +{lines_added} / -{lines_removed}")
-
                 cwd = status.get("cwd") or session.get("cwd", "?")
                 details.append(f"Dir: {cwd}")
                 details.append(f"Updated: {format_time_ago(age)}")
-
             elif transcript:
-                # Transcript-only data (e.g., T3/sdk-ts sessions)
                 model = transcript.get("model", "?")
                 age = now - transcript["_transcript_mtime"]
                 out_tokens = transcript.get("output_tokens", 0)
-                label = f"{ep_icon} {name}  {format_tokens(out_tokens)}\u2193"
-
-                submenu = rumps.MenuItem(label)
+                item = rumps.MenuItem(item_label)
                 details = [
                     f"Model: {model}",
                     f"Output: {format_tokens(out_tokens)} tokens (last msg)",
@@ -658,48 +672,88 @@ class ClaudeWatchApp(rumps.App):
                     f"Last active: {format_time_ago(age)}",
                 ]
             else:
-                continue
+                return None
 
             for d in details:
-                submenu.add(rumps.MenuItem(d, callback=None))
+                item.add(rumps.MenuItem(d, callback=None))
 
-            # Add T3 threads for this session
-            threads = t3_threads.get(sid, [])
-            if threads:
-                submenu.add(rumps.MenuItem("── Threads ──", callback=None))
-                for thread in threads:
-                    title = thread.get("title", "Untitled")
-                    last_seen = thread.get("last_seen_at", "")
-                    try:
-                        dt = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
-                        thread_age = format_time_ago(now - dt.timestamp())
-                    except (ValueError, AttributeError):
-                        thread_age = "?"
-                    submenu.add(rumps.MenuItem(f"  {title}  ({thread_age})", callback=None))
+            return item
+
+        # Group active sessions by project name
+        groups: dict[str, list[dict]] = {}
+        for session in sorted(active, key=session_last_active, reverse=True):
+            name = session.get("name") or short_project_name(session.get("cwd", "?"))
+            groups.setdefault(name, []).append(session)
+
+        # Sort groups by most recent activity
+        sorted_groups = sorted(
+            groups.items(),
+            key=lambda kv: max(session_last_active(s) for s in kv[1]),
+            reverse=True,
+        )
+
+        self.sessions_header.title = f"Active Sessions ({len(sorted_groups)})"
+
+        for name, group_sessions in sorted_groups:
+            most_recent = max(group_sessions, key=session_last_active)
+            ep_icon = ep_icons.get(most_recent.get("entrypoint", "?"), "\u2022")
+            label = f"{ep_icon} {name}"  # count added after filtering below
+            submenu = rumps.MenuItem(label)
+
+            sorted_sessions = sorted(group_sessions, key=session_last_active, reverse=True)
+
+            # If some sessions in the group have T3 threads and others don't,
+            # only show the ones with T3 threads (the others are orphaned sessions)
+            with_threads = [s for s in sorted_sessions if t3_threads.get(s.get("sessionId", ""))]
+            if with_threads:
+                sorted_sessions = with_threads
+
+            n = len(sorted_sessions)
+            if n > 1:
+                label = f"{ep_icon} {name}  ({n} threads)"
+
+            # Detect duplicate thread labels within the group — append age to distinguish
+            thread_labels = [thread_label_for(s) for s in sorted_sessions]
+            seen: dict[str, int] = {}
+            for lbl in thread_labels:
+                seen[lbl] = seen.get(lbl, 0) + 1
+            disambiguate = {lbl for lbl, count in seen.items() if count > 1}
+
+            for session in sorted_sessions:
+                base_label = thread_label_for(session)
+                if base_label in disambiguate:
+                    age = now - session_last_active(session)
+                    display_label = f"{base_label}  ({format_time_ago(age)})"
+                else:
+                    display_label = base_label
+                child = build_session_submenu(session, label=display_label)
+                if child:
+                    submenu.add(child)
 
             self._session_keys.append(label)
             self.menu.insert_after(self._sessions_header_key, submenu)
 
-        # Add recent sessions (started <24h ago but not active in current window)
-        for session in sorted(recent, key=lambda s: s.get("startedAt", 0), reverse=True):
+        # Recent sessions grouped by project name
+        recent_groups: dict[str, list[dict]] = {}
+        for session in recent:
             name = session.get("name") or short_project_name(session.get("cwd", "?"))
-            entrypoint = session.get("entrypoint", "?")
+            recent_groups.setdefault(name, []).append(session)
+
+        self.recent_header.title = f"Recent Sessions ({len(recent_groups)})" if recent_groups else "Recent Sessions"
+
+        for name, group_sessions in sorted(
+            recent_groups.items(),
+            key=lambda kv: max(session_last_active(s) for s in kv[1]),
+            reverse=True,
+        ):
+            most_recent = max(group_sessions, key=session_last_active)
+            sid = most_recent.get("sessionId", "")
+            entrypoint = most_recent.get("entrypoint", "?")
             ep_icon = ep_icons.get(entrypoint, "\u2022")
-
-            # Use transcript mtime if available, else startedAt
-            sid = session.get("sessionId", "")
-            transcript = transcript_info.get(sid)
-            if transcript:
-                age = now - transcript["_transcript_mtime"]
-            else:
-                age = now - session.get("startedAt", 0) / 1000
-
+            age = now - session_last_active(most_recent)
             label = f"{ep_icon} {name}  ({format_time_ago(age)})"
-
             submenu = rumps.MenuItem(label)
-            cwd = session.get("cwd", "?")
-            submenu.add(rumps.MenuItem(f"Dir: {cwd}", callback=None))
-
+            submenu.add(rumps.MenuItem(f"Dir: {most_recent.get('cwd', '?')}", callback=None))
             self._session_keys.append(label)
             self.menu.insert_after(self._recent_header_key, submenu)
 
