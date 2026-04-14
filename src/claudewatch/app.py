@@ -2,6 +2,7 @@
 
 import json
 import os
+import sqlite3
 import subprocess
 import urllib.request
 import urllib.error
@@ -16,8 +17,19 @@ STATUS_DIR = CLAUDE_DIR / "status"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 
 POLL_INTERVAL = 5  # seconds
-API_POLL_INTERVAL = 600  # 10 minutes — conservative to avoid 429s
+API_POLL_INTERVAL = 180  # 3 minutes
 API_STALE_THRESHOLD = 300  # only poll API if no status update in 5 minutes
+API_LOG = Path.home() / ".claude" / "claudewatch-api.log"
+
+
+def _log_api(msg: str):
+    """Append a timestamped line to the API log."""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with open(API_LOG, "a") as f:
+            f.write(f"{ts}  {msg}\n")
+    except OSError:
+        pass
 
 
 def fetch_oauth_usage() -> dict | None:
@@ -32,13 +44,16 @@ def fetch_oauth_usage() -> dict | None:
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:
+            _log_api("ERROR  keychain read failed")
             return None
 
         creds = json.loads(result.stdout)
         token = creds.get("claudeAiOauth", {}).get("accessToken")
         if not token:
+            _log_api("ERROR  no accessToken in keychain")
             return None
 
+        _log_api("GET    /api/oauth/usage")
         req = urllib.request.Request(
             "https://api.anthropic.com/api/oauth/usage",
             headers={
@@ -49,33 +64,41 @@ def fetch_oauth_usage() -> dict | None:
         resp = urllib.request.urlopen(req, timeout=10)
         data = json.loads(resp.read())
 
-        # Convert to the same format as status file rate_limits
-        five_hour = data.get("five_hour", {})
-        seven_day = data.get("seven_day", {})
-
         def parse_reset(iso_str: str) -> int:
-            """Convert ISO timestamp to unix epoch."""
             try:
                 dt = datetime.fromisoformat(iso_str)
                 return int(dt.timestamp())
             except (ValueError, TypeError):
                 return 0
 
+        five_hour = data.get("five_hour", {})
+        seven_day = data.get("seven_day", {})
+        used_5h = int(five_hour.get("utilization", 0))
+        used_7d = int(seven_day.get("utilization", 0))
+
+        _log_api(f"OK     5h={used_5h}%  7d={used_7d}%")
+
         return {
             "rate_limits": {
                 "five_hour": {
-                    "used_percentage": int(five_hour.get("utilization", 0)),
+                    "used_percentage": used_5h,
                     "resets_at": parse_reset(five_hour.get("resets_at", "")),
                 },
                 "seven_day": {
-                    "used_percentage": int(seven_day.get("utilization", 0)),
+                    "used_percentage": used_7d,
                     "resets_at": parse_reset(seven_day.get("resets_at", "")),
                 },
             },
             "_source": "oauth_api",
         }
-    except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError,
-            subprocess.TimeoutExpired, KeyError, OSError):
+    except urllib.error.HTTPError as e:
+        _log_api(f"HTTP {e.code}  {e.reason}")
+        return None
+    except urllib.error.URLError as e:
+        _log_api(f"ERROR  network: {e.reason}")
+        return None
+    except (json.JSONDecodeError, subprocess.TimeoutExpired, KeyError, OSError) as e:
+        _log_api(f"ERROR  {type(e).__name__}: {e}")
         return None
 
 
@@ -265,6 +288,63 @@ def get_transcript_info(sessions: list[dict]) -> dict[str, dict]:
     return result
 
 
+T3_DB = Path.home() / ".t3" / "userdata" / "state.sqlite"
+
+
+def get_t3_threads() -> dict[str, list[dict]]:
+    """Read T3 Code's SQLite database and return threads grouped by Claude session ID.
+
+    Returns a dict mapping claude_session_id -> list of thread dicts.
+    """
+    if not T3_DB.exists():
+        return {}
+
+    try:
+        con = sqlite3.connect(f"file:{T3_DB}?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+        cur = con.execute("""
+            SELECT
+                psr.thread_id,
+                psr.status,
+                psr.last_seen_at,
+                psr.resume_cursor_json,
+                psr.runtime_payload_json,
+                pt.title,
+                pt.updated_at
+            FROM provider_session_runtime psr
+            JOIN projection_threads pt ON psr.thread_id = pt.thread_id
+            WHERE pt.deleted_at IS NULL
+              AND pt.archived_at IS NULL
+            ORDER BY psr.last_seen_at DESC
+        """)
+        rows = cur.fetchall()
+        con.close()
+    except sqlite3.Error:
+        return {}
+
+    result: dict[str, list[dict]] = {}
+    for row in rows:
+        try:
+            resume = json.loads(row["resume_cursor_json"] or "{}")
+            runtime = json.loads(row["runtime_payload_json"] or "{}")
+            claude_sid = resume.get("resume")
+            if not claude_sid:
+                continue
+
+            thread = {
+                "title": row["title"],
+                "status": row["status"],
+                "last_seen_at": row["last_seen_at"],
+                "cwd": runtime.get("cwd", ""),
+                "model": runtime.get("model", ""),
+            }
+            result.setdefault(claude_sid, []).append(thread)
+        except (json.JSONDecodeError, KeyError):
+            continue
+
+    return result
+
+
 def compute_5h_window_start(statuses: list[dict]) -> float:
     """Compute when the current 5h window started from rate limit data."""
     for status in statuses:
@@ -282,7 +362,7 @@ class ClaudeWatchApp(rumps.App):
 
         self._last_window_start = 0.0
         self._session_keys: list[str] = []
-        self._last_api_poll = 0.0
+        self._last_api_poll = self._load_api_poll_time()
         self._api_rate_limits: dict | None = None
 
         self.rate_5h = rumps.MenuItem("5-hour: --", callback=None)
@@ -308,6 +388,22 @@ class ClaudeWatchApp(rumps.App):
 
         self.timer = rumps.Timer(self.refresh, POLL_INTERVAL)
         self.timer.start()
+
+    _API_POLL_CACHE = CLAUDE_DIR / "claudewatch-api-poll.txt"
+
+    def _load_api_poll_time(self) -> float:
+        """Load the last API poll timestamp from disk (survives restarts)."""
+        try:
+            return float(self._API_POLL_CACHE.read_text().strip())
+        except (OSError, ValueError):
+            return 0.0
+
+    def _save_api_poll_time(self, ts: float):
+        """Persist the last API poll timestamp to disk."""
+        try:
+            self._API_POLL_CACHE.write_text(str(ts))
+        except OSError:
+            pass
 
     def refresh(self, sender=None):
         """Poll status files and update the menubar."""
@@ -342,9 +438,15 @@ class ClaudeWatchApp(rumps.App):
             max(all_statuses, key=lambda s: s["_mtime"]) if all_statuses else None
         )
 
-        # Poll OAuth API if status files are stale
-        latest_status_age = now - latest["_mtime"] if latest else float("inf")
-        if (latest_status_age > API_STALE_THRESHOLD
+        # Merge in cached API data if more recent than status files
+        if self._api_rate_limits:
+            api_mtime = self._api_rate_limits.get("_mtime", 0)
+            if not latest or api_mtime > latest["_mtime"]:
+                latest = self._api_rate_limits
+
+        # Poll OAuth API if best available data is stale
+        latest_age = now - latest["_mtime"] if latest else float("inf")
+        if (latest_age > API_STALE_THRESHOLD
                 and now - self._last_api_poll > API_POLL_INTERVAL):
             api_data = fetch_oauth_usage()
             if api_data:
@@ -352,19 +454,16 @@ class ClaudeWatchApp(rumps.App):
                 api_data["_session_id"] = "_api"
                 self._api_rate_limits = api_data
                 self._last_api_poll = now
-
-        # Use API data if it's more recent than status files
-        if self._api_rate_limits:
-            api_mtime = self._api_rate_limits.get("_mtime", 0)
-            if not latest or api_mtime > latest["_mtime"]:
-                latest = self._api_rate_limits
+                self._save_api_poll_time(now)
+                latest = api_data
 
         # Per-session statuses: only for alive sessions within the window
         sessions = get_active_sessions()
         statuses = get_session_statuses(sessions, window_start)
 
-        # Also get transcript info for sessions without status files
+        # Also get transcript info and T3 threads
         transcript_info = get_transcript_info(sessions)
+        t3_threads = get_t3_threads()
 
         # Find the most recent activity across status files AND transcripts
         latest_activity = latest["_mtime"] if latest else 0
@@ -372,7 +471,7 @@ class ClaudeWatchApp(rumps.App):
             latest_activity = max(latest_activity, t.get("_transcript_mtime", 0))
 
         self._update_rate_limits(latest, latest_activity, now)
-        self._update_sessions(sessions, statuses, transcript_info, now)
+        self._update_sessions(sessions, statuses, transcript_info, t3_threads, now)
 
     def _update_rate_limits(self, latest: dict | None, latest_activity: float, now: float):
         """Update menubar title and rate limit menu items."""
@@ -411,7 +510,8 @@ class ClaudeWatchApp(rumps.App):
         self.last_updated.title = f"Last active: {format_time_ago(age)}"
 
     def _update_sessions(self, sessions: list[dict], statuses: list[dict],
-                         transcript_info: dict[str, dict], now: float):
+                         transcript_info: dict[str, dict],
+                         t3_threads: dict[str, list[dict]], now: float):
         """Update the sessions list in the dropdown.
 
         - "Active": has a status file OR transcript modified in current 5h window
@@ -519,6 +619,20 @@ class ClaudeWatchApp(rumps.App):
 
             for d in details:
                 submenu.add(rumps.MenuItem(d, callback=None))
+
+            # Add T3 threads for this session
+            threads = t3_threads.get(sid, [])
+            if threads:
+                submenu.add(rumps.MenuItem("── Threads ──", callback=None))
+                for thread in threads:
+                    title = thread.get("title", "Untitled")
+                    last_seen = thread.get("last_seen_at", "")
+                    try:
+                        dt = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
+                        thread_age = format_time_ago(now - dt.timestamp())
+                    except (ValueError, AttributeError):
+                        thread_age = "?"
+                    submenu.add(rumps.MenuItem(f"  {title}  ({thread_age})", callback=None))
 
             self._session_keys.append(label)
             self.menu.insert_after(self._sessions_header_key, submenu)
