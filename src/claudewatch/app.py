@@ -21,6 +21,23 @@ API_POLL_INTERVAL = 60  # 1 minute
 API_STALE_THRESHOLD = 300  # only poll API if no status update in 5 minutes
 API_LOG = Path.home() / ".claude" / "claudewatch-api.log"
 
+STATUS_PAGE_URL = "https://status.anthropic.com/api/v2/summary.json"
+STATUS_POLL_INTERVAL = 60  # 1 minute
+
+STATUS_ICONS = {
+    "none": "",
+    "minor": "\u26a0\ufe0f",    # ⚠️
+    "major": "\U0001f534",      # 🔴
+    "critical": "\U0001f6a8",   # 🚨
+}
+
+STATUS_LABELS = {
+    "none": "All Systems Operational",
+    "minor": "Minor Incident",
+    "major": "Partial Outage",
+    "critical": "Major Outage",
+}
+
 
 def _log_api(msg: str):
     """Append a timestamped line to the API log."""
@@ -100,6 +117,77 @@ def fetch_oauth_usage() -> dict | None:
     except (json.JSONDecodeError, subprocess.TimeoutExpired, KeyError, OSError) as e:
         _log_api(f"ERROR  {type(e).__name__}: {e}")
         return None
+
+
+def _is_real_error(err: str) -> bool:
+    """Return True only for actual API errors, not T3 internal diagnostics."""
+    err_lower = err.lower()
+    # Exclude T3 internal diagnostic messages
+    if err_lower.startswith("[ede_diagnostic]"):
+        return False
+    # Include known real error patterns
+    real_patterns = ["500", "503", "overloaded", "rate_limit", "timeout",
+                     "network", "connection", "unavailable", "error:"]
+    return any(p in err_lower for p in real_patterns)
+
+
+def fetch_claude_status() -> dict:
+    """Fetch Claude system status from the Anthropic status page.
+
+    Returns a dict with:
+      indicator: 'none' | 'minor' | 'major' | 'critical'
+      description: human-readable status string
+      incidents: list of active incident dicts (name, impact, updated_at)
+      errors: list of T3 session lastError strings (client-side errors)
+    """
+    result = {
+        "indicator": "none",
+        "description": "All Systems Operational",
+        "incidents": [],
+        "errors": [],
+    }
+
+    # Fetch Anthropic status page
+    try:
+        req = urllib.request.Request(STATUS_PAGE_URL,
+                                     headers={"User-Agent": "ClaudeWatch/0.1"})
+        resp = urllib.request.urlopen(req, timeout=10)
+        data = json.loads(resp.read())
+
+        status = data.get("status", {})
+        result["indicator"] = status.get("indicator", "none")
+        result["description"] = status.get("description", "")
+
+        for incident in data.get("incidents", []):
+            result["incidents"].append({
+                "name": incident.get("name", "Unknown incident"),
+                "impact": incident.get("impact", "none"),
+                "updated_at": incident.get("updated_at", ""),
+            })
+    except (urllib.error.URLError, json.JSONDecodeError, OSError):
+        pass
+
+    # Check T3 session errors from SQLite
+    if T3_DB.exists():
+        try:
+            con = sqlite3.connect(f"file:{T3_DB}?mode=ro", uri=True)
+            cur = con.execute(
+                "SELECT runtime_payload_json FROM provider_session_runtime "
+                "WHERE runtime_payload_json LIKE '%lastError%'"
+            )
+            for (payload,) in cur.fetchall():
+                try:
+                    rp = json.loads(payload or "{}")
+                    err = rp.get("lastError")
+                    if err and _is_real_error(str(err)):
+                        result["errors"].append(str(err))
+                except json.JSONDecodeError:
+                    pass
+            con.close()
+        except sqlite3.Error:
+            pass
+
+    return result
 
 
 def pid_alive(pid: int) -> bool:
@@ -391,10 +479,16 @@ class ClaudeWatchApp(rumps.App):
         self._session_keys: list[str] = []
         self._api_rate_limits: dict | None = self._load_api_cache()
         self._last_api_poll = 0.0  # always fetch fresh data on startup
+        self._last_status_poll = 0.0
+        self._claude_status: dict = {"indicator": "none", "description": "", "incidents": [], "errors": []}
 
         self.rate_5h = rumps.MenuItem("5-hour: --", callback=None)
         self.rate_7d = rumps.MenuItem("7-day: --", callback=None)
         self.last_updated = rumps.MenuItem("Last updated: --", callback=None)
+        self.status_item = rumps.MenuItem(
+            "✅ All Systems Operational",
+            callback=lambda _: rumps.open_url("https://status.anthropic.com")
+        )
         self.sessions_header = rumps.MenuItem("Active Sessions", callback=None)
         self._sessions_header_key = "Active Sessions"
         self.recent_header = rumps.MenuItem("Recent Sessions", callback=None)
@@ -404,6 +498,7 @@ class ClaudeWatchApp(rumps.App):
             self.rate_5h,
             self.rate_7d,
             self.last_updated,
+            self.status_item,
             None,
             self.sessions_header,
             None,
@@ -518,6 +613,11 @@ class ClaudeWatchApp(rumps.App):
         for t in transcript_info.values():
             latest_activity = max(latest_activity, t.get("_transcript_mtime", 0))
 
+        # Poll Claude system status
+        if force or now - self._last_status_poll > STATUS_POLL_INTERVAL:
+            self._claude_status = fetch_claude_status()
+            self._last_status_poll = now
+
         self._update_rate_limits(latest, latest_activity, now)
         self._update_sessions(sessions, statuses, transcript_info, t3_threads, now)
 
@@ -544,7 +644,15 @@ class ClaudeWatchApp(rumps.App):
 
         # Menubar title
         icon = status_icon(used_5h, resets_at_5h, now)
-        self.title = f"{icon}{used_5h}% \u21bb{format_countdown(countdown_5h)}"
+
+        # Append status icon to title if Claude is having issues or session errors
+        cs = self._claude_status
+        s_indicator = cs.get("indicator", "none")
+        s_icon = STATUS_ICONS.get(s_indicator, "")
+        has_errors = bool(cs.get("errors"))
+        alert = s_icon or ("\u26a0\ufe0f" if has_errors else "")
+        suffix = f"  {alert}" if alert else ""
+        self.title = f"{icon}{used_5h}% \u21bb{format_countdown(countdown_5h)}{suffix}"
 
         # Dropdown items
         reset_time_5h = datetime.fromtimestamp(resets_at_5h).strftime("%-I:%M %p") if resets_at_5h else "?"
@@ -552,6 +660,18 @@ class ClaudeWatchApp(rumps.App):
 
         self.rate_5h.title = f"5-hour:  {used_5h}% used  (resets {reset_time_5h})"
         self.rate_7d.title = f"7-day:   {used_7d}% used  (resets {reset_time_7d})"
+
+        # Status item
+        incidents = cs.get("incidents", [])
+        errors = cs.get("errors", [])
+        if s_indicator == "none" and not errors:
+            self.status_item.title = "\u2705 All Systems Operational"
+        elif errors and s_indicator == "none":
+            self.status_item.title = f"\u26a0\ufe0f Session error detected"
+        elif incidents:
+            self.status_item.title = f"{s_icon} {incidents[0]['name']}"
+        else:
+            self.status_item.title = f"{s_icon} {STATUS_LABELS.get(s_indicator, s_indicator)}"
 
         # "Last updated" uses the most recent activity (status OR transcript)
         age = now - latest_activity if latest_activity > 0 else now - latest["_mtime"]
