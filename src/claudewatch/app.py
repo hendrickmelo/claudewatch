@@ -6,6 +6,7 @@ import sqlite3
 import subprocess
 import urllib.request
 import urllib.error
+import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -503,7 +504,7 @@ class ClaudeWatchApp(rumps.App):
         self.last_updated = rumps.MenuItem("Last updated: --", callback=None)
         self.status_item = rumps.MenuItem(
             "✅ All Systems Operational",
-            callback=lambda _: rumps.open_url("https://status.anthropic.com")
+            callback=lambda _: webbrowser.open("https://status.anthropic.com")
         )
         self.sessions_header = rumps.MenuItem("Active Sessions", callback=None)
         self._sessions_header_key = "Active Sessions"
