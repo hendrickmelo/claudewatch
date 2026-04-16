@@ -43,9 +43,12 @@ include = ["src/", "README.md", "LICENSE"]
 
 [project.optional-dependencies]
 dev = [
-    "build",
-    "twine",
+    "ruff",
 ]
+
+[tool.uv]
+# rumps/pyobjc only resolve on macOS
+environments = ["sys_platform == 'darwin'"]
 
 [tool.ruff]
 line-length = 100
