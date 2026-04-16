@@ -379,25 +379,41 @@ def get_session_statuses(sessions: list[dict], window_start: float) -> list[dict
     return results
 
 
+_transcript_cache: dict[str, dict] = {}  # sid -> {_transcript_mtime, model, ...}
+_transcript_path_cache: dict[str, Path | None] = {}  # sid -> Path
+
+
 def get_transcript_info(sessions: list[dict]) -> dict[str, dict]:
     """Get transcript-based info for sessions (mtime, model, tokens).
 
+    Caches results and only re-reads files when mtime changes.
     Returns a dict keyed by session ID.
     """
     result = {}
     for session in sessions:
         sid = session.get("sessionId", "")
-        transcript = find_transcript(sid)
+
+        # Cache the transcript path lookup (expensive glob)
+        if sid not in _transcript_path_cache:
+            _transcript_path_cache[sid] = find_transcript(sid)
+        transcript = _transcript_path_cache[sid]
         if not transcript:
             continue
 
         mtime = transcript.stat().st_mtime
-        info = {"_transcript_mtime": mtime, "_session_id": sid}
 
+        # Only re-read if file changed since last read
+        cached = _transcript_cache.get(sid)
+        if cached and cached.get("_transcript_mtime") == mtime:
+            result[sid] = cached
+            continue
+
+        info: dict = {"_transcript_mtime": mtime, "_session_id": sid}
         tail = read_transcript_tail(transcript)
         if tail:
             info.update(tail)
 
+        _transcript_cache[sid] = info
         result[sid] = info
 
     return result
