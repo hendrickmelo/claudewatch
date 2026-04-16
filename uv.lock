@@ -10,7 +10,7 @@ supported-markers = [
 
 [[package]]
 name = "claudewatch"
-version = "0.1.0"
+version = "0.1.1.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "rumps", marker = "sys_platform == 'darwin'" },

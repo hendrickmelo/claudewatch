@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "claudewatch"
-version = "0.1.0"
+version = "0.1.1.dev0"
 description = "macOS menubar app showing Claude Code rate limits and session status"
 readme = "README.md"
 license = "MIT"
