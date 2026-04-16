@@ -23,7 +23,7 @@ A macOS menubar app that shows your Claude Code rate limit usage and active sess
 
 - **Claude Code CLI** — full status via statusline hook
 - **Claude Code VSCode extension** — session detection
-- **[T3 Code](https://t3.chat)** — thread titles and session grouping via T3's local database
+- **[T3 Code](https://t3.chat/code)** — thread titles and session grouping via T3's local database
 
 Other Claude clients (claude.ai web, Claude desktop app) are **not** tracked — they don't go through Claude Code.
 
