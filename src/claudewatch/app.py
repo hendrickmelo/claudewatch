@@ -1,16 +1,17 @@
 """ClaudeWatch menubar application."""
 
 import json
-import os
 import sqlite3
 import subprocess
-import urllib.request
 import urllib.error
+import urllib.request
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 
 import rumps
+
+from claudewatch.core.process import pid_alive
 
 CLAUDE_DIR = Path.home() / ".claude"
 SESSIONS_DIR = CLAUDE_DIR / "sessions"
@@ -189,15 +190,6 @@ def fetch_claude_status() -> dict:
             pass
 
     return result
-
-
-def pid_alive(pid: int) -> bool:
-    """Check if a process is still running."""
-    try:
-        os.kill(pid, 0)
-        return True
-    except (OSError, ProcessLookupError):
-        return False
 
 
 def format_countdown(seconds: float) -> str:
