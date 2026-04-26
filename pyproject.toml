@@ -24,6 +24,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
+    "keyring>=24",
     "psutil>=5.9",
     "rumps>=0.4.0",
 ]

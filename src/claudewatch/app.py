@@ -2,7 +2,6 @@
 
 import json
 import sqlite3
-import subprocess
 import urllib.error
 import urllib.request
 import webbrowser
@@ -12,6 +11,7 @@ from pathlib import Path
 import rumps
 
 from claudewatch.core.process import pid_alive
+from claudewatch.core.secrets import get_oauth_token
 
 CLAUDE_DIR = Path.home() / ".claude"
 SESSIONS_DIR = CLAUDE_DIR / "sessions"
@@ -58,18 +58,9 @@ def fetch_oauth_usage() -> dict | None:
     or None if the request fails (429, auth error, etc.).
     """
     try:
-        result = subprocess.run(
-            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode != 0:
-            _log_api("ERROR  keychain read failed")
-            return None
-
-        creds = json.loads(result.stdout)
-        token = creds.get("claudeAiOauth", {}).get("accessToken")
+        token = get_oauth_token()
         if not token:
-            _log_api("ERROR  no accessToken in keychain")
+            _log_api("ERROR  no oauth token available")
             return None
 
         _log_api("GET    /api/oauth/usage")
@@ -116,7 +107,7 @@ def fetch_oauth_usage() -> dict | None:
     except urllib.error.URLError as e:
         _log_api(f"ERROR  network: {e.reason}")
         return None
-    except (json.JSONDecodeError, subprocess.TimeoutExpired, KeyError, OSError) as e:
+    except (json.JSONDecodeError, KeyError, OSError) as e:
         _log_api(f"ERROR  {type(e).__name__}: {e}")
         return None
 
