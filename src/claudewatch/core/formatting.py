@@ -16,6 +16,18 @@ STATUS_LABELS = {
     "critical": "Major Outage",
 }
 
+# Entrypoint glyphs — Claude Code session origin (cli vs VSCode extension vs T3 SDK).
+ENTRYPOINT_ICONS = {
+    "cli": "\U0001f4bb",            # 💻
+    "claude-vscode": "\U0001f5a5️",  # 🖥️
+    "sdk-ts": "⚙️",       # ⚙️
+}
+
+
+def entrypoint_glyph(name: str) -> str:
+    """Return the emoji glyph for a Claude Code entrypoint, or '•' if unknown."""
+    return ENTRYPOINT_ICONS.get(name, "•")
+
 
 def format_countdown(seconds: float) -> str:
     """Format seconds into a human-readable countdown."""
