@@ -7,12 +7,12 @@ Run this to verify the icon/title logic works before a real incident happens.
 import sys
 sys.path.insert(0, "src")
 
-from claudewatch.app import (
-    _is_real_error,
-    status_icon,
+from claudewatch.core.api import _is_real_error
+from claudewatch.core.formatting import (
     STATUS_ICONS,
     STATUS_LABELS,
     format_countdown,
+    status_icon,
 )
 
 # ── Helper ────────────────────────────────────────────────────────────────────
@@ -96,7 +96,7 @@ print(f"  Err:      {simulate_title(20, resets_at, now, 'none', True)}")
 # ── 5. Live status page fetch ─────────────────────────────────────────────────
 
 print("\n── Live status fetch ──")
-from claudewatch.app import fetch_claude_status
+from claudewatch.core.api import fetch_claude_status
 result = fetch_claude_status()
 print(f"  indicator:  {result['indicator']}")
 print(f"  description: {result['description']}")
