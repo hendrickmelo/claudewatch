@@ -26,7 +26,9 @@ classifiers = [
 dependencies = [
     "keyring>=24",
     "psutil>=5.9",
-    "rumps>=0.4.0",
+    "rumps>=0.4.0; sys_platform == 'darwin'",
+    "pystray>=0.19; sys_platform == 'win32'",
+    "Pillow>=10; sys_platform == 'win32'",
 ]
 
 [project.urls]
@@ -37,6 +39,11 @@ Issues = "https://github.com/hendrickmelo/claudewatch/issues"
 [project.scripts]
 claudewatch = "claudewatch.cli:main"
 
+[project.gui-scripts]
+# Windows-only: pip's gui-scripts entry installs as claudewatchw.exe, which
+# launches via pythonw.exe (no console window flashing on tray-app start).
+claudewatchw = "claudewatch.cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/claudewatch"]
 
@@ -44,13 +51,12 @@ packages = ["src/claudewatch"]
 include = ["src/", "README.md", "LICENSE"]
 
 [project.optional-dependencies]
+macos = ["rumps>=0.4.0"]
+windows = ["pystray>=0.19", "Pillow>=10"]
 dev = [
     "ruff",
+    "pyinstaller>=6; sys_platform == 'win32'",
 ]
-
-[tool.uv]
-# rumps/pyobjc only resolve on macOS
-environments = ["sys_platform == 'darwin'"]
 
 [tool.ruff]
 line-length = 100
