@@ -4,8 +4,8 @@ import json
 import os
 import sqlite3
 import subprocess
-import urllib.request
 import urllib.error
+import urllib.request
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,14 +22,14 @@ API_POLL_INTERVAL = 60  # 1 minute
 API_STALE_THRESHOLD = 300  # only poll API if no status update in 5 minutes
 API_LOG = Path.home() / ".claude" / "claudewatch-api.log"
 
-STATUS_PAGE_URL = "https://status.anthropic.com/api/v2/summary.json"
+STATUS_PAGE_URL = "https://status.claude.com/api/v2/summary.json"
 STATUS_POLL_INTERVAL = 60  # 1 minute
 
 STATUS_ICONS = {
     "none": "",
-    "minor": "\u26a0\ufe0f",    # ⚠️
-    "major": "\U0001f534",      # 🔴
-    "critical": "\U0001f6a8",   # 🚨
+    "minor": "\u26a0\ufe0f",  # ⚠️
+    "major": "\U0001f534",  # 🔴
+    "critical": "\U0001f6a8",  # 🚨
 }
 
 STATUS_LABELS = {
@@ -59,7 +59,9 @@ def fetch_oauth_usage() -> dict | None:
     try:
         result = subprocess.run(
             ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode != 0:
             _log_api("ERROR  keychain read failed")
@@ -127,8 +129,17 @@ def _is_real_error(err: str) -> bool:
     if err_lower.startswith("[ede_diagnostic]"):
         return False
     # Include known real error patterns
-    real_patterns = ["500", "503", "overloaded", "rate_limit", "timeout",
-                     "network", "connection", "unavailable", "error:"]
+    real_patterns = [
+        "500",
+        "503",
+        "overloaded",
+        "rate_limit",
+        "timeout",
+        "network",
+        "connection",
+        "unavailable",
+        "error:",
+    ]
     return any(p in err_lower for p in real_patterns)
 
 
@@ -150,8 +161,7 @@ def fetch_claude_status() -> dict:
 
     # Fetch Anthropic status page
     try:
-        req = urllib.request.Request(STATUS_PAGE_URL,
-                                     headers={"User-Agent": "ClaudeWatch/0.1"})
+        req = urllib.request.Request(STATUS_PAGE_URL, headers={"User-Agent": "ClaudeWatch/0.1"})
         resp = urllib.request.urlopen(req, timeout=10)
         data = json.loads(resp.read())
 
@@ -160,11 +170,13 @@ def fetch_claude_status() -> dict:
         result["description"] = status.get("description", "")
 
         for incident in data.get("incidents", []):
-            result["incidents"].append({
-                "name": incident.get("name", "Unknown incident"),
-                "impact": incident.get("impact", "none"),
-                "updated_at": incident.get("updated_at", ""),
-            })
+            result["incidents"].append(
+                {
+                    "name": incident.get("name", "Unknown incident"),
+                    "impact": incident.get("impact", "none"),
+                    "updated_at": incident.get("updated_at", ""),
+                }
+            )
     except (urllib.error.URLError, json.JSONDecodeError, OSError):
         pass
 
@@ -225,7 +237,9 @@ def format_time_ago(seconds: float) -> str:
     return f"{hours // 24}d ago"
 
 
-def status_icon(used_pct: int, resets_at: float = 0, now: float = 0) -> str:
+def status_icon(
+    used_pct: int, resets_at: float = 0, now: float = 0, window_hours: float = 5
+) -> str:
     """Return a colored circle based on smart burn-rate projection.
 
     If we have timing data, projects whether the current burn rate will
@@ -237,23 +251,23 @@ def status_icon(used_pct: int, resets_at: float = 0, now: float = 0) -> str:
         return "\U0001f7e2"
 
     if resets_at and now:
-        window_duration = 5 * 3600
+        window_duration = window_hours * 3600
         window_start = resets_at - window_duration
         time_elapsed = now - window_start
         time_remaining = resets_at - now
 
         if time_elapsed > 60 and time_remaining > 0:
-            burn_rate = used_pct / time_elapsed          # % per second
+            burn_rate = used_pct / time_elapsed  # % per second
             projected = used_pct + burn_rate * time_remaining
 
             if projected < 80:
-                return "\U0001f7e2"   # green — on track
+                return "\U0001f7e2"  # green — on track
             elif projected < 100:
-                return "\U0001f7e1"   # yellow — might get close
+                return "\U0001f7e1"  # yellow — might get close
             elif projected < 130:
-                return "\U0001f7e0"   # orange — likely to hit limit
+                return "\U0001f7e0"  # orange — likely to hit limit
             else:
-                return "\U0001f534"   # red — well over
+                return "\U0001f534"  # red — well over
 
     # Fallback: no timing data
     if used_pct < 60:
@@ -497,14 +511,23 @@ class ClaudeWatchApp(rumps.App):
         self._api_rate_limits: dict | None = self._load_api_cache()
         self._last_api_poll = 0.0  # always fetch fresh data on startup
         self._last_status_poll = 0.0
-        self._claude_status: dict = {"indicator": "none", "description": "", "incidents": [], "errors": []}
+        self._claude_status: dict = {
+            "indicator": "none",
+            "description": "",
+            "incidents": [],
+            "errors": [],
+        }
 
-        self.rate_5h = rumps.MenuItem("5-hour: --", callback=None)
-        self.rate_7d = rumps.MenuItem("7-day: --", callback=None)
+        self.rate_5h = rumps.MenuItem(
+            "5-hour: --", callback=lambda _: webbrowser.open("https://claude.ai/settings/usage")
+        )
+        self.rate_7d = rumps.MenuItem(
+            "7-day: --", callback=lambda _: webbrowser.open("https://claude.ai/settings/usage")
+        )
         self.last_updated = rumps.MenuItem("Last updated: --", callback=None)
         self.status_item = rumps.MenuItem(
             "✅ All Systems Operational",
-            callback=lambda _: webbrowser.open("https://status.anthropic.com")
+            callback=lambda _: webbrowser.open("https://status.claude.com"),
         )
         self.sessions_header = rumps.MenuItem("Active Sessions", callback=None)
         self._sessions_header_key = "Active Sessions"
@@ -588,8 +611,10 @@ class ClaudeWatchApp(rumps.App):
 
         # Most recent status file for account-wide rate limits
         recent_statuses = [s for s in all_statuses if s["_mtime"] >= window_start]
-        latest = max(recent_statuses, key=lambda s: s["_mtime"]) if recent_statuses else (
-            max(all_statuses, key=lambda s: s["_mtime"]) if all_statuses else None
+        latest = (
+            max(recent_statuses, key=lambda s: s["_mtime"])
+            if recent_statuses
+            else (max(all_statuses, key=lambda s: s["_mtime"]) if all_statuses else None)
         )
 
         # Merge in cached API data if more recent than status files
@@ -605,8 +630,11 @@ class ClaudeWatchApp(rumps.App):
         force = sender is not None and not isinstance(sender, rumps.Timer)
         is_startup = self._last_api_poll == 0.0
         latest_age = now - latest["_mtime"] if latest else float("inf")
-        if (force or is_startup or (latest_age > API_STALE_THRESHOLD
-                                    and now - self._last_api_poll > API_POLL_INTERVAL)):
+        if (
+            force
+            or is_startup
+            or (latest_age > API_STALE_THRESHOLD and now - self._last_api_poll > API_POLL_INTERVAL)
+        ):
             api_data = fetch_oauth_usage()
             if api_data:
                 api_data["_mtime"] = now
@@ -642,8 +670,8 @@ class ClaudeWatchApp(rumps.App):
         """Update menubar title and rate limit menu items."""
         if not latest:
             self.title = "\u2022 --"
-            self.rate_5h.title = "5-hour: no data"
-            self.rate_7d.title = "7-day: no data"
+            self.rate_5h.title = "⚪ 5-hour: no data"
+            self.rate_7d.title = "⚪ 7-day: no data"
             self.last_updated.title = "No status data yet"
             return
 
@@ -672,11 +700,17 @@ class ClaudeWatchApp(rumps.App):
         self.title = f"{icon}{used_5h}% \u21bb{format_countdown(countdown_5h)}{suffix}"
 
         # Dropdown items
-        reset_time_5h = datetime.fromtimestamp(resets_at_5h).strftime("%-I:%M %p") if resets_at_5h else "?"
-        reset_time_7d = datetime.fromtimestamp(resets_at_7d).strftime("%a %-I:%M %p") if resets_at_7d else "?"
+        reset_time_5h = (
+            datetime.fromtimestamp(resets_at_5h).strftime("%-I:%M %p") if resets_at_5h else "?"
+        )
+        reset_time_7d = (
+            datetime.fromtimestamp(resets_at_7d).strftime("%a %-I:%M %p") if resets_at_7d else "?"
+        )
 
-        self.rate_5h.title = f"5-hour:  {used_5h}% used  (resets {reset_time_5h})"
-        self.rate_7d.title = f"7-day:   {used_7d}% used  (resets {reset_time_7d})"
+        icon_5h = status_icon(used_5h, resets_at_5h, now)
+        icon_7d = status_icon(used_7d, resets_at_7d, now, window_hours=7 * 24)
+        self.rate_5h.title = f"{icon_5h} 5-hour:  {used_5h}% used  (resets {reset_time_5h})"
+        self.rate_7d.title = f"{icon_7d} 7-day:   {used_7d}% used  (resets {reset_time_7d})"
 
         # Status item
         incidents = cs.get("incidents", [])
@@ -684,7 +718,7 @@ class ClaudeWatchApp(rumps.App):
         if s_indicator == "none" and not errors:
             self.status_item.title = "\u2705 All Systems Operational"
         elif errors and s_indicator == "none":
-            self.status_item.title = f"\u26a0\ufe0f Session error detected"
+            self.status_item.title = "\u26a0\ufe0f Session error detected"
         elif incidents:
             self.status_item.title = f"{s_icon} {incidents[0]['name']}"
         else:
@@ -694,9 +728,14 @@ class ClaudeWatchApp(rumps.App):
         age = now - latest_activity if latest_activity > 0 else now - latest["_mtime"]
         self.last_updated.title = f"Last active: {format_time_ago(age)}"
 
-    def _update_sessions(self, sessions: list[dict], statuses: list[dict],
-                         transcript_info: dict[str, dict],
-                         t3_threads: dict[str, list[dict]], now: float):
+    def _update_sessions(
+        self,
+        sessions: list[dict],
+        statuses: list[dict],
+        transcript_info: dict[str, dict],
+        t3_threads: dict[str, list[dict]],
+        now: float,
+    ):
         """Update the sessions list in the dropdown.
 
         - "Active": has a status file OR transcript modified in current 5h window
@@ -744,8 +783,10 @@ class ClaudeWatchApp(rumps.App):
             t = transcript_info.get(sid)
             st = status_by_id.get(sid)
             times = []
-            if t: times.append(t.get("_transcript_mtime", 0))
-            if st: times.append(st.get("_mtime", 0))
+            if t:
+                times.append(t.get("_transcript_mtime", 0))
+            if st:
+                times.append(st.get("_mtime", 0))
             return max(times) if times else s.get("startedAt", 0) / 1000
 
         def thread_label_for(session: dict) -> str:
@@ -829,13 +870,15 @@ class ClaudeWatchApp(rumps.App):
             reverse=True,
         )
 
-        self.sessions_header.title = f"Active Sessions ({len(sorted_groups)})"
-
-        for name, group_sessions in sorted_groups:
+        def build_project_submenu(
+            name: str, group_sessions: list[dict], show_ep_icon: bool = True
+        ) -> tuple[str, rumps.MenuItem]:
+            """Build a project-level submenu item with thread children."""
             most_recent = max(group_sessions, key=session_last_active)
-            ep_icon = ep_icons.get(most_recent.get("entrypoint", "?"), "\u2022")
-            label = f"{ep_icon} {name}"  # count added after filtering below
-            submenu = rumps.MenuItem(label)
+            ep_icon = (
+                ep_icons.get(most_recent.get("entrypoint", "?"), "\u2022") if show_ep_icon else ""
+            )
+            prefix = f"{ep_icon} " if ep_icon else ""
 
             sorted_sessions = sorted(group_sessions, key=session_last_active, reverse=True)
 
@@ -846,8 +889,8 @@ class ClaudeWatchApp(rumps.App):
                 sorted_sessions = with_threads
 
             n = len(sorted_sessions)
-            if n > 1:
-                label = f"{ep_icon} {name}  ({n} threads)"
+            label = f"{prefix}{name}  ({n} threads)" if n > 1 else f"{prefix}{name}"
+            submenu = rumps.MenuItem(label)
 
             # Detect duplicate thread labels within the group — append age to distinguish
             thread_labels = [thread_label_for(s) for s in sorted_sessions]
@@ -867,6 +910,34 @@ class ClaudeWatchApp(rumps.App):
                 if child:
                     submenu.add(child)
 
+            return label, submenu
+
+        # Separate T3 Code (sdk-ts) groups from direct (CLI/VS Code) groups
+        t3_groups = []
+        direct_groups = []
+        for name, group_sessions in sorted_groups:
+            most_recent = max(group_sessions, key=session_last_active)
+            if most_recent.get("entrypoint") == "sdk-ts":
+                t3_groups.append((name, group_sessions))
+            else:
+                direct_groups.append((name, group_sessions))
+
+        display_count = len(direct_groups) + (1 if t3_groups else 0)
+        self.sessions_header.title = f"Active Sessions ({display_count})"
+
+        # Insert T3 Code parent first (ends up after direct groups in the menu)
+        if t3_groups:
+            t3_label = f"\u2699\ufe0f T3 Code  ({len(t3_groups)})"
+            t3_parent = rumps.MenuItem(t3_label)
+            for name, group_sessions in t3_groups:
+                _, project_submenu = build_project_submenu(name, group_sessions, show_ep_icon=False)
+                t3_parent.add(project_submenu)
+            self._session_keys.append(t3_label)
+            self.menu.insert_after(self._sessions_header_key, t3_parent)
+
+        # Add non-T3 groups directly to the menu
+        for name, group_sessions in direct_groups:
+            label, submenu = build_project_submenu(name, group_sessions)
             self._session_keys.append(label)
             self.menu.insert_after(self._sessions_header_key, submenu)
 
@@ -876,7 +947,9 @@ class ClaudeWatchApp(rumps.App):
             name = session.get("name") or short_project_name(session.get("cwd", "?"))
             recent_groups.setdefault(name, []).append(session)
 
-        self.recent_header.title = f"Recent Sessions ({len(recent_groups)})" if recent_groups else "Recent Sessions"
+        self.recent_header.title = (
+            f"Recent Sessions ({len(recent_groups)})" if recent_groups else "Recent Sessions"
+        )
 
         for name, group_sessions in sorted(
             recent_groups.items(),
