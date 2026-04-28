@@ -54,8 +54,9 @@ include = ["src/", "README.md", "LICENSE"]
 macos = ["rumps>=0.4.0"]
 windows = ["pystray>=0.19", "Pillow>=10"]
 dev = [
-    "ruff",
+    "Pillow>=10",  # icon_render tests; ships unconditionally on Windows already
     "pyinstaller>=6; sys_platform == 'win32'",
+    "ruff",
 ]
 
 [tool.ruff]
