@@ -14,11 +14,39 @@ SETTINGS_FILE = CLAUDE_DIR / "settings.json"
 
 
 def get_hook_path() -> Path:
-    """Get the installed path of the statusline hook script for this platform."""
+    """Get the source path of the statusline hook script for this platform."""
     if sys.platform == "win32":
-        # Phase B will ship platform/windows/hook.ps1 here.
-        raise NotImplementedError("Windows statusline hook is not yet implemented (Phase B).")
+        return Path(files("claudewatch.platform.windows").joinpath("hook.ps1"))
     return Path(files("claudewatch.platform.macos").joinpath("hook.sh"))
+
+
+def _hook_dest() -> Path:
+    """Where ``install`` copies the hook into the user's ~/.claude directory."""
+    if sys.platform == "win32":
+        return CLAUDE_DIR / "claudewatch-hook.ps1"
+    return CLAUDE_DIR / "claudewatch-hook.sh"
+
+
+def _build_hook_command(hook_dest: Path, chain: str | None) -> str:
+    """Build the ``statusLine.command`` string for Claude Code's settings.json.
+
+    On Windows the command must invoke PowerShell explicitly (cmd.exe is the
+    default shell for statusLine). On Unix the hook script is invoked directly.
+    """
+    if sys.platform == "win32":
+        cmd = f'powershell -NoProfile -ExecutionPolicy Bypass -File "{hook_dest}"'
+        if chain:
+            # Chain is passed verbatim — supports arbitrary command lines.
+            cmd += f' -Chain "{chain}"'
+        return cmd
+
+    if chain:
+        chain_path = Path(chain).expanduser().resolve()
+        if not chain_path.exists():
+            print(f"Error: chained script not found: {chain_path}", file=sys.stderr)
+            sys.exit(1)
+        return f"{hook_dest} --chain {chain_path}"
+    return str(hook_dest)
 
 
 def install_hook(chain: str | None = None):
@@ -28,19 +56,13 @@ def install_hook(chain: str | None = None):
 
     # Copy hook script to a stable location
     hook_src = get_hook_path()
-    hook_dest = CLAUDE_DIR / "claudewatch-hook.sh"
+    hook_dest = _hook_dest()
     shutil.copy2(hook_src, hook_dest)
-    hook_dest.chmod(0o755)
+    if sys.platform != "win32":
+        # Windows doesn't have a POSIX execute bit; PowerShell runs .ps1 directly.
+        hook_dest.chmod(0o755)
 
-    # Build the statusline command
-    if chain:
-        chain_path = Path(chain).expanduser().resolve()
-        if not chain_path.exists():
-            print(f"Error: chained script not found: {chain_path}", file=sys.stderr)
-            sys.exit(1)
-        command = f"{hook_dest} --chain {chain_path}"
-    else:
-        command = str(hook_dest)
+    command = _build_hook_command(hook_dest, chain)
 
     # Read existing settings
     settings = {}
@@ -61,7 +83,7 @@ def install_hook(chain: str | None = None):
             response = input("Replace it? [y/N] ").strip().lower()
             if response != "y":
                 # Auto-chain with existing
-                command = f"{hook_dest} --chain {existing_cmd}"
+                command = _build_hook_command(hook_dest, existing_cmd)
                 print("Chaining with existing statusline.")
 
     # Update settings
@@ -75,6 +97,21 @@ def install_hook(chain: str | None = None):
     print()
     print("ClaudeWatch will now receive status updates from Claude Code sessions.")
     print("Run 'claudewatch' to start the menubar app.")
+
+
+def _extract_chained(command: str) -> str:
+    """Pull the original chained command line out of a ClaudeWatch statusLine.
+
+    Returns "" if the command isn't chained. Handles both ``--chain X`` (Unix)
+    and ``-Chain "X"`` (PowerShell ``-File ...\\hook.ps1 -Chain "..."``).
+    """
+    if "-Chain " in command:
+        # PowerShell: -Chain "<command line>" — pull from the first quote.
+        after = command.split("-Chain ", 1)[1]
+        return after.strip().strip('"')
+    if "--chain" in command:
+        return command.split("--chain", 1)[1].strip()
+    return ""
 
 
 def uninstall_hook():
@@ -91,23 +128,21 @@ def uninstall_hook():
         print("ClaudeWatch hook not found in settings, nothing to uninstall.")
         return
 
-    # If chaining, restore the chained command
-    if "--chain" in command:
-        parts = command.split("--chain")
-        chained = parts[1].strip() if len(parts) > 1 else ""
-        if chained:
-            settings["statusLine"] = {"type": "command", "command": chained}
-            print(f"Restored original statusline: {chained}")
-        else:
-            del settings["statusLine"]
+    # If chaining, restore the chained command. Both --chain (Unix) and
+    # -Chain (PowerShell) are recognized; the trailing chained command line
+    # may be unquoted (Unix) or quoted (Windows ``-Chain "..."``).
+    chained = _extract_chained(command)
+    if chained:
+        settings["statusLine"] = {"type": "command", "command": chained}
+        print(f"Restored original statusline: {chained}")
     else:
         del settings["statusLine"]
         print("Removed statusLine from settings.")
 
     SETTINGS_FILE.write_text(json.dumps(settings, indent=4) + "\n")
 
-    # Clean up hook script
-    hook = CLAUDE_DIR / "claudewatch-hook.sh"
+    # Clean up hook script for the current platform
+    hook = _hook_dest()
     if hook.exists():
         hook.unlink()
         print(f"Removed: {hook}")
