@@ -8,17 +8,33 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  test:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v6
-      - run: uv sync
-      - run: uv run python test_status.py
-
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v6
-      - run: uv run ruff check src/
+      - run: uv sync --extra dev
+      - run: uv run ruff check src/ tests/
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - name: Sync with platform extras
+        # On macOS the `macos` extra is implied via the sys_platform marker
+        # on rumps; on Windows pystray + Pillow ditto. We sync `dev` for
+        # pytest and ruff, and the matching platform extra to make sure the
+        # extras themselves resolve cleanly per OS.
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            uv sync --extra dev --extra macos
+          else
+            uv sync --extra dev --extra windows
+          fi
+      - run: uv run pytest -v
