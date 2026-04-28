@@ -32,6 +32,14 @@ class ClaudeStatusView:
 
 
 @dataclass(frozen=True)
+class RateLimit:
+    """Display state for a rate-limit row (5-hour or 7-day)."""
+
+    label: str
+    click_url: str = "https://claude.ai/settings/usage"
+
+
+@dataclass(frozen=True)
 class ThreadItem:
     """A single Claude Code session/thread in the dropdown."""
 
@@ -53,8 +61,8 @@ class Snapshot:
     """Immutable view-model assembled once per refresh tick."""
 
     title_text: str  # menubar text e.g. "🟢12% ↻3h45m  ⚠️"
-    rate_5h_label: str
-    rate_7d_label: str
+    rate_5h: RateLimit
+    rate_7d: RateLimit
     last_active_label: str
     claude_status: ClaudeStatusView
     active_header: str  # "Active Sessions (3)"
@@ -76,7 +84,7 @@ def build_snapshot(
     now: float,
 ) -> Snapshot:
     """Assemble an immutable Snapshot from the raw data sources."""
-    title_text, rate_5h_label, rate_7d_label, last_active_label = _build_rate_block(
+    title_text, rate_5h, rate_7d, last_active_label = _build_rate_block(
         latest, latest_activity, claude_status, now
     )
     cs_view = _build_status_view(claude_status)
@@ -85,8 +93,8 @@ def build_snapshot(
     )
     return Snapshot(
         title_text=title_text,
-        rate_5h_label=rate_5h_label,
-        rate_7d_label=rate_7d_label,
+        rate_5h=rate_5h,
+        rate_7d=rate_7d,
         last_active_label=last_active_label,
         claude_status=cs_view,
         active_header=active_header,
@@ -104,10 +112,15 @@ def _build_rate_block(
     latest_activity: float,
     claude_status: dict,
     now: float,
-) -> tuple[str, str, str, str]:
-    """Return (title_text, rate_5h_label, rate_7d_label, last_active_label)."""
+) -> tuple[str, RateLimit, RateLimit, str]:
+    """Return (title_text, rate_5h, rate_7d, last_active_label)."""
     if not latest:
-        return "• --", "5-hour: no data", "7-day: no data", "No status data yet"
+        return (
+            "• --",
+            RateLimit(label="5-hour: no data"),
+            RateLimit(label="7-day: no data"),
+            "No status data yet",
+        )
 
     rl = latest.get("rate_limits", {})
     five_hour = rl.get("five_hour", {})
@@ -135,13 +148,13 @@ def _build_rate_block(
         datetime.fromtimestamp(resets_at_7d).strftime("%a %-I:%M %p") if resets_at_7d else "?"
     )
 
-    rate_5h_label = f"5-hour:  {used_5h}% used  (resets {reset_time_5h})"
-    rate_7d_label = f"7-day:   {used_7d}% used  (resets {reset_time_7d})"
+    rate_5h = RateLimit(label=f"5-hour:  {used_5h}% used  (resets {reset_time_5h})")
+    rate_7d = RateLimit(label=f"7-day:   {used_7d}% used  (resets {reset_time_7d})")
 
     age = now - latest_activity if latest_activity > 0 else now - latest["_mtime"]
     last_active_label = f"Last active: {format_time_ago(age)}"
 
-    return title_text, rate_5h_label, rate_7d_label, last_active_label
+    return title_text, rate_5h, rate_7d, last_active_label
 
 
 def _build_status_view(claude_status: dict) -> ClaudeStatusView:

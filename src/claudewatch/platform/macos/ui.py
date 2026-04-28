@@ -21,8 +21,14 @@ class ClaudeWatchApp(rumps.App):
         self._state = AppState()
         self._session_keys: list[str] = []
 
-        self.rate_5h = rumps.MenuItem("5-hour: --", callback=None)
-        self.rate_7d = rumps.MenuItem("7-day: --", callback=None)
+        self.rate_5h = rumps.MenuItem(
+            "5-hour: --",
+            callback=lambda _: webbrowser.open("https://claude.ai/settings/usage"),
+        )
+        self.rate_7d = rumps.MenuItem(
+            "7-day: --",
+            callback=lambda _: webbrowser.open("https://claude.ai/settings/usage"),
+        )
         self.last_updated = rumps.MenuItem("Last updated: --", callback=None)
         self.status_item = rumps.MenuItem(
             "✅ All Systems Operational",
@@ -61,8 +67,8 @@ class ClaudeWatchApp(rumps.App):
 
     def _render(self, snap: Snapshot) -> None:
         self.title = snap.title_text
-        self.rate_5h.title = snap.rate_5h_label
-        self.rate_7d.title = snap.rate_7d_label
+        self.rate_5h.title = snap.rate_5h.label
+        self.rate_7d.title = snap.rate_7d.label
         self.last_updated.title = snap.last_active_label
         self.status_item.title = snap.claude_status.label
         self._render_session_groups(snap)
