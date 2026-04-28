@@ -11,11 +11,11 @@ from datetime import datetime
 from claudewatch.core.paths import API_LOG, T3_DB
 from claudewatch.core.secrets import get_oauth_token
 
-API_POLL_INTERVAL = 60          # seconds — minimum between OAuth polls
-API_STALE_THRESHOLD = 300       # only poll OAuth if status files are this stale
+API_POLL_INTERVAL = 60  # seconds — minimum between OAuth polls
+API_STALE_THRESHOLD = 300  # only poll OAuth if status files are this stale
 
 STATUS_PAGE_URL = "https://status.anthropic.com/api/v2/summary.json"
-STATUS_POLL_INTERVAL = 60       # seconds — minimum between status-page polls
+STATUS_POLL_INTERVAL = 60  # seconds — minimum between status-page polls
 
 
 def _log_api(msg: str) -> None:
@@ -96,8 +96,17 @@ def _is_real_error(err: str) -> bool:
     if err_lower.startswith("[ede_diagnostic]"):
         return False
     # Include known real error patterns
-    real_patterns = ["500", "503", "overloaded", "rate_limit", "timeout",
-                     "network", "connection", "unavailable", "error:"]
+    real_patterns = [
+        "500",
+        "503",
+        "overloaded",
+        "rate_limit",
+        "timeout",
+        "network",
+        "connection",
+        "unavailable",
+        "error:",
+    ]
     return any(p in err_lower for p in real_patterns)
 
 
@@ -119,8 +128,7 @@ def fetch_claude_status() -> dict:
 
     # Fetch Anthropic status page
     try:
-        req = urllib.request.Request(STATUS_PAGE_URL,
-                                     headers={"User-Agent": "ClaudeWatch/0.1"})
+        req = urllib.request.Request(STATUS_PAGE_URL, headers={"User-Agent": "ClaudeWatch/0.1"})
         resp = urllib.request.urlopen(req, timeout=10)
         data = json.loads(resp.read())
 
@@ -129,11 +137,13 @@ def fetch_claude_status() -> dict:
         result["description"] = status.get("description", "")
 
         for incident in data.get("incidents", []):
-            result["incidents"].append({
-                "name": incident.get("name", "Unknown incident"),
-                "impact": incident.get("impact", "none"),
-                "updated_at": incident.get("updated_at", ""),
-            })
+            result["incidents"].append(
+                {
+                    "name": incident.get("name", "Unknown incident"),
+                    "impact": incident.get("impact", "none"),
+                    "updated_at": incident.get("updated_at", ""),
+                }
+            )
     except (urllib.error.URLError, json.JSONDecodeError, OSError):
         pass
 

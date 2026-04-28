@@ -26,6 +26,7 @@ from claudewatch.core.formatting import (
 @dataclass(frozen=True)
 class ClaudeStatusView:
     """Display state for the 'Claude system status' menu item."""
+
     label: str
     click_url: str = "https://status.anthropic.com"
 
@@ -33,6 +34,7 @@ class ClaudeStatusView:
 @dataclass(frozen=True)
 class ThreadItem:
     """A single Claude Code session/thread in the dropdown."""
+
     label: str
     details: tuple[str, ...] = ()
 
@@ -40,6 +42,7 @@ class ThreadItem:
 @dataclass(frozen=True)
 class ProjectGroup:
     """A group of threads sharing the same project (cwd-derived)."""
+
     label: str
     icon_hint: str  # entrypoint name, in case the UI wants a custom glyph
     threads: tuple[ThreadItem, ...]
@@ -48,14 +51,15 @@ class ProjectGroup:
 @dataclass(frozen=True)
 class Snapshot:
     """Immutable view-model assembled once per refresh tick."""
-    title_text: str            # menubar text e.g. "🟢12% ↻3h45m  ⚠️"
+
+    title_text: str  # menubar text e.g. "🟢12% ↻3h45m  ⚠️"
     rate_5h_label: str
     rate_7d_label: str
     last_active_label: str
     claude_status: ClaudeStatusView
-    active_header: str         # "Active Sessions (3)"
+    active_header: str  # "Active Sessions (3)"
     active_groups: tuple[ProjectGroup, ...]
-    recent_header: str         # "Recent Sessions (2)" or "Recent Sessions"
+    recent_header: str  # "Recent Sessions (2)" or "Recent Sessions"
     recent_groups: tuple[ProjectGroup, ...]
 
 
@@ -183,9 +187,7 @@ def _build_session_groups(
         started_at = session.get("startedAt", 0) / 1000
         has_status = sid in status_by_id
         transcript = transcript_info.get(sid)
-        transcript_recent = (
-            transcript and transcript.get("_transcript_mtime", 0) >= window_start
-        )
+        transcript_recent = transcript and transcript.get("_transcript_mtime", 0) >= window_start
         if has_status or transcript_recent:
             active.append(session)
         elif started_at >= cutoff_24h:
@@ -284,9 +286,7 @@ def _build_session_groups(
         sorted_sessions = sorted(group_sessions, key=session_last_active, reverse=True)
 
         # If some sessions have T3 threads and others don't, only show ones with threads.
-        with_threads = [
-            s for s in sorted_sessions if t3_threads.get(s.get("sessionId", ""))
-        ]
+        with_threads = [s for s in sorted_sessions if t3_threads.get(s.get("sessionId", ""))]
         if with_threads:
             sorted_sessions = with_threads
 
@@ -312,9 +312,7 @@ def _build_session_groups(
             if item is not None:
                 thread_items.append(item)
 
-        active_groups.append(
-            ProjectGroup(label=label, icon_hint=ep, threads=tuple(thread_items))
-        )
+        active_groups.append(ProjectGroup(label=label, icon_hint=ep, threads=tuple(thread_items)))
 
     # Recent: group by project name
     recent_by_project: dict[str, list[dict]] = {}
@@ -323,9 +321,7 @@ def _build_session_groups(
         recent_by_project.setdefault(name, []).append(session)
 
     recent_header = (
-        f"Recent Sessions ({len(recent_by_project)})"
-        if recent_by_project
-        else "Recent Sessions"
+        f"Recent Sessions ({len(recent_by_project)})" if recent_by_project else "Recent Sessions"
     )
     recent_groups: list[ProjectGroup] = []
 
@@ -343,8 +339,6 @@ def _build_session_groups(
             label=f"Dir: {most_recent.get('cwd', '?')}",
             details=(),
         )
-        recent_groups.append(
-            ProjectGroup(label=label, icon_hint=ep, threads=(thread,))
-        )
+        recent_groups.append(ProjectGroup(label=label, icon_hint=ep, threads=(thread,)))
 
     return active_header, tuple(active_groups), recent_header, tuple(recent_groups)

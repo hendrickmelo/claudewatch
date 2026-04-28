@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import webbrowser
 from datetime import datetime, timezone
 
@@ -69,10 +70,8 @@ class ClaudeWatchApp(rumps.App):
     def _render_session_groups(self, snap: Snapshot) -> None:
         # Drop previously-rendered project items so the menu doesn't accumulate
         for key in list(self._session_keys):
-            try:
+            with contextlib.suppress(KeyError):
                 del self.menu[key]
-            except KeyError:
-                pass
         self._session_keys.clear()
 
         self.sessions_header.title = snap.active_header

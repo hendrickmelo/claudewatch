@@ -8,6 +8,7 @@ sources directly.
 
 from __future__ import annotations
 
+import contextlib
 import json
 
 from claudewatch.core.api import (
@@ -107,9 +108,7 @@ class AppState:
                 all_statuses.append(data)
         return all_statuses
 
-    def _pick_latest(
-        self, all_statuses: list[dict], window_start: float
-    ) -> dict | None:
+    def _pick_latest(self, all_statuses: list[dict], window_start: float) -> dict | None:
         """Pick the freshest rate-limit source: status file vs cached API data."""
         recent = [s for s in all_statuses if s["_mtime"] >= window_start]
         latest = (
@@ -125,19 +124,14 @@ class AppState:
 
     # ── API polling ──────────────────────────────────────────────────────────
 
-    def _maybe_poll_api(
-        self, latest: dict | None, now: float, *, force: bool
-    ) -> dict | None:
+    def _maybe_poll_api(self, latest: dict | None, now: float, *, force: bool) -> dict | None:
         """Hit the OAuth usage API if forced, on startup, or when data is stale."""
         is_startup = self._last_api_poll == 0.0
         latest_age = now - latest["_mtime"] if latest else float("inf")
         should_poll = (
             force
             or is_startup
-            or (
-                latest_age > API_STALE_THRESHOLD
-                and now - self._last_api_poll > API_POLL_INTERVAL
-            )
+            or (latest_age > API_STALE_THRESHOLD and now - self._last_api_poll > API_POLL_INTERVAL)
         )
         if not should_poll:
             return latest
@@ -163,10 +157,8 @@ class AppState:
 
     @staticmethod
     def _save_api_poll_time(ts: float) -> None:
-        try:
+        with contextlib.suppress(OSError):
             API_POLL_CACHE.write_text(str(ts))
-        except OSError:
-            pass
 
     @staticmethod
     def _load_api_cache() -> dict | None:
@@ -177,7 +169,5 @@ class AppState:
 
     @staticmethod
     def _save_api_cache(data: dict) -> None:
-        try:
+        with contextlib.suppress(OSError):
             API_DATA_CACHE.write_text(json.dumps(data))
-        except OSError:
-            pass

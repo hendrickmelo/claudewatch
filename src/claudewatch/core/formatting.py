@@ -4,9 +4,9 @@ from __future__ import annotations
 
 STATUS_ICONS = {
     "none": "",
-    "minor": "⚠️",    # ⚠️
-    "major": "\U0001f534",      # 🔴
-    "critical": "\U0001f6a8",   # 🚨
+    "minor": "⚠️",  # ⚠️
+    "major": "\U0001f534",  # 🔴
+    "critical": "\U0001f6a8",  # 🚨
 }
 
 STATUS_LABELS = {
@@ -18,9 +18,9 @@ STATUS_LABELS = {
 
 # Entrypoint glyphs — Claude Code session origin (cli vs VSCode extension vs T3 SDK).
 ENTRYPOINT_ICONS = {
-    "cli": "\U0001f4bb",            # 💻
+    "cli": "\U0001f4bb",  # 💻
     "claude-vscode": "\U0001f5a5️",  # 🖥️
-    "sdk-ts": "⚙️",       # ⚙️
+    "sdk-ts": "⚙️",  # ⚙️
 }
 
 
@@ -72,17 +72,17 @@ def status_icon(used_pct: int, resets_at: float = 0, now: float = 0) -> str:
         time_remaining = resets_at - now
 
         if time_elapsed > 60 and time_remaining > 0:
-            burn_rate = used_pct / time_elapsed          # % per second
+            burn_rate = used_pct / time_elapsed  # % per second
             projected = used_pct + burn_rate * time_remaining
 
             if projected < 80:
-                return "\U0001f7e2"   # green — on track
+                return "\U0001f7e2"  # green — on track
             elif projected < 100:
-                return "\U0001f7e1"   # yellow — might get close
+                return "\U0001f7e1"  # yellow — might get close
             elif projected < 130:
-                return "\U0001f7e0"   # orange — likely to hit limit
+                return "\U0001f7e0"  # orange — likely to hit limit
             else:
-                return "\U0001f534"   # red — well over
+                return "\U0001f534"  # red — well over
 
     # Fallback: no timing data
     if used_pct < 60:

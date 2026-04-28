@@ -16,12 +16,9 @@ def detect() -> Callable[[], None]:
     """Return a no-args callable that launches the platform's UI."""
     if sys.platform == "darwin":
         from claudewatch.platform.macos.ui import run
+
         return run
     if sys.platform == "win32":
         # Phase B will populate this.
-        raise NotImplementedError(
-            "ClaudeWatch's Windows UI is not yet implemented (Phase B)."
-        )
-    raise NotImplementedError(
-        f"ClaudeWatch does not support sys.platform={sys.platform!r}."
-    )
+        raise NotImplementedError("ClaudeWatch's Windows UI is not yet implemented (Phase B).")
+    raise NotImplementedError(f"ClaudeWatch does not support sys.platform={sys.platform!r}.")

@@ -17,9 +17,7 @@ def get_hook_path() -> Path:
     """Get the installed path of the statusline hook script for this platform."""
     if sys.platform == "win32":
         # Phase B will ship platform/windows/hook.ps1 here.
-        raise NotImplementedError(
-            "Windows statusline hook is not yet implemented (Phase B)."
-        )
+        raise NotImplementedError("Windows statusline hook is not yet implemented (Phase B).")
     return Path(files("claudewatch.platform.macos").joinpath("hook.sh"))
 
 
@@ -64,7 +62,7 @@ def install_hook(chain: str | None = None):
             if response != "y":
                 # Auto-chain with existing
                 command = f"{hook_dest} --chain {existing_cmd}"
-                print(f"Chaining with existing statusline.")
+                print("Chaining with existing statusline.")
 
     # Update settings
     settings["statusLine"] = {"type": "command", "command": command}
@@ -136,9 +134,7 @@ def main():
     )
 
     # uninstall
-    subparsers.add_parser(
-        "uninstall", help="Remove the statusline hook from Claude Code"
-    )
+    subparsers.add_parser("uninstall", help="Remove the statusline hook from Claude Code")
 
     args = parser.parse_args()
 
@@ -149,6 +145,7 @@ def main():
     elif args.command is None:
         # Default: launch the menubar app for the current platform
         from claudewatch.platform import detect
+
         detect()()
     else:
         parser.print_help()
