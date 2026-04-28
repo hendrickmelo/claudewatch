@@ -28,7 +28,7 @@ class ClaudeStatusView:
     """Display state for the 'Claude system status' menu item."""
 
     label: str
-    click_url: str = "https://status.anthropic.com"
+    click_url: str = "https://status.claude.com"
 
 
 @dataclass(frozen=True)

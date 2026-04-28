@@ -14,7 +14,7 @@ from claudewatch.core.secrets import get_oauth_token
 API_POLL_INTERVAL = 60  # seconds — minimum between OAuth polls
 API_STALE_THRESHOLD = 300  # only poll OAuth if status files are this stale
 
-STATUS_PAGE_URL = "https://status.anthropic.com/api/v2/summary.json"
+STATUS_PAGE_URL = "https://status.claude.com/api/v2/summary.json"
 STATUS_POLL_INTERVAL = 60  # seconds — minimum between status-page polls
 
 
