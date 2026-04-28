@@ -81,6 +81,16 @@ class ClaudeWatchApp(rumps.App):
         self._session_keys.clear()
 
         self.sessions_header.title = snap.active_header
+
+        # Insert the T3 supergroup first; subsequent direct-group inserts push
+        # it down so it ends up at the bottom of the active-sessions block.
+        if snap.t3_supergroup:
+            parent = rumps.MenuItem(snap.t3_supergroup.label)
+            for project in snap.t3_supergroup.projects:
+                parent.add(self._build_project_submenu(project))
+            self._session_keys.append(snap.t3_supergroup.label)
+            self.menu.insert_after(self._sessions_header_key, parent)
+
         for group in snap.active_groups:
             submenu = self._build_project_submenu(group)
             self._session_keys.append(group.label)

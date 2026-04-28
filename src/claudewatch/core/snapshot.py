@@ -57,6 +57,19 @@ class ProjectGroup:
 
 
 @dataclass(frozen=True)
+class T3SuperGroup:
+    """Container that nests every sdk-ts (T3 Code) project under one parent.
+
+    Rendered as a single menu item with the contained ProjectGroups as
+    its children, so a user with a dozen T3 sessions doesn't see a
+    dozen separate top-level rows.
+    """
+
+    label: str  # "⚙️ T3 Code  (3)"
+    projects: tuple[ProjectGroup, ...]
+
+
+@dataclass(frozen=True)
 class Snapshot:
     """Immutable view-model assembled once per refresh tick."""
 
@@ -65,8 +78,9 @@ class Snapshot:
     rate_7d: RateLimit
     last_active_label: str
     claude_status: ClaudeStatusView
-    active_header: str  # "Active Sessions (3)"
-    active_groups: tuple[ProjectGroup, ...]
+    active_header: str  # "Active Sessions (3)" — counts direct + (1 if T3 supergroup)
+    active_groups: tuple[ProjectGroup, ...]  # direct (non-T3) groups
+    t3_supergroup: T3SuperGroup | None
     recent_header: str  # "Recent Sessions (2)" or "Recent Sessions"
     recent_groups: tuple[ProjectGroup, ...]
 
@@ -88,7 +102,13 @@ def build_snapshot(
         latest, latest_activity, claude_status, now
     )
     cs_view = _build_status_view(claude_status)
-    active_header, active_groups, recent_header, recent_groups = _build_session_groups(
+    (
+        active_header,
+        active_groups,
+        t3_supergroup,
+        recent_header,
+        recent_groups,
+    ) = _build_session_groups(
         sessions, statuses, transcript_info, t3_threads, window_start, now
     )
     return Snapshot(
@@ -99,6 +119,7 @@ def build_snapshot(
         claude_status=cs_view,
         active_header=active_header,
         active_groups=active_groups,
+        t3_supergroup=t3_supergroup,
         recent_header=recent_header,
         recent_groups=recent_groups,
     )
@@ -188,8 +209,14 @@ def _build_session_groups(
     t3_threads: dict[str, list[dict]],
     window_start: float,
     now: float,
-) -> tuple[str, tuple[ProjectGroup, ...], str, tuple[ProjectGroup, ...]]:
-    """Return (active_header, active_groups, recent_header, recent_groups)."""
+) -> tuple[
+    str,
+    tuple[ProjectGroup, ...],
+    T3SuperGroup | None,
+    str,
+    tuple[ProjectGroup, ...],
+]:
+    """Return (active_header, active_groups, t3_supergroup, recent_header, recent_groups)."""
     status_by_id = {s["_session_id"]: s for s in statuses}
 
     # Split into active vs recent
@@ -291,13 +318,15 @@ def _build_session_groups(
         reverse=True,
     )
 
-    active_header = f"Active Sessions ({len(sorted_active)})"
-    active_groups: list[ProjectGroup] = []
-
-    for name, group_sessions in sorted_active:
+    def make_project_group(
+        name: str, group_sessions: list[dict], *, show_ep_icon: bool
+    ) -> ProjectGroup:
+        """Build a ProjectGroup. T3 children pass show_ep_icon=False (parent has it)."""
         most_recent = max(group_sessions, key=session_last_active)
         ep = most_recent.get("entrypoint", "?")
-        ep_icon = entrypoint_glyph(ep)
+        ep_icon = entrypoint_glyph(ep) if show_ep_icon else ""
+        prefix = f"{ep_icon} " if ep_icon else ""
+
         sorted_sessions = sorted(group_sessions, key=session_last_active, reverse=True)
 
         # If some sessions have T3 threads and others don't, only show ones with threads.
@@ -306,7 +335,7 @@ def _build_session_groups(
             sorted_sessions = with_threads
 
         n = len(sorted_sessions)
-        label = f"{ep_icon} {name}  ({n} threads)" if n > 1 else f"{ep_icon} {name}"
+        label = f"{prefix}{name}  ({n} threads)" if n > 1 else f"{prefix}{name}"
 
         # Disambiguate duplicate thread labels by appending age
         thread_labels = [thread_label_for(s) for s in sorted_sessions]
@@ -327,7 +356,28 @@ def _build_session_groups(
             if item is not None:
                 thread_items.append(item)
 
-        active_groups.append(ProjectGroup(label=label, icon_hint=ep, threads=tuple(thread_items)))
+        return ProjectGroup(label=label, icon_hint=ep, threads=tuple(thread_items))
+
+    # Partition into T3 (sdk-ts) vs direct, then build each kind appropriately.
+    direct_groups: list[ProjectGroup] = []
+    t3_projects: list[ProjectGroup] = []
+    for name, group_sessions in sorted_active:
+        most_recent = max(group_sessions, key=session_last_active)
+        if most_recent.get("entrypoint") == "sdk-ts":
+            t3_projects.append(make_project_group(name, group_sessions, show_ep_icon=False))
+        else:
+            direct_groups.append(make_project_group(name, group_sessions, show_ep_icon=True))
+
+    t3_supergroup: T3SuperGroup | None = None
+    if t3_projects:
+        t3_supergroup = T3SuperGroup(
+            label=f"⚙️ T3 Code  ({len(t3_projects)})",
+            projects=tuple(t3_projects),
+        )
+
+    # T3 supergroup counts as one item in the header tally.
+    active_count = len(direct_groups) + (1 if t3_supergroup else 0)
+    active_header = f"Active Sessions ({active_count})"
 
     # Recent: group by project name
     recent_by_project: dict[str, list[dict]] = {}
@@ -356,4 +406,10 @@ def _build_session_groups(
         )
         recent_groups.append(ProjectGroup(label=label, icon_hint=ep, threads=(thread,)))
 
-    return active_header, tuple(active_groups), recent_header, tuple(recent_groups)
+    return (
+        active_header,
+        tuple(direct_groups),
+        t3_supergroup,
+        recent_header,
+        tuple(recent_groups),
+    )
