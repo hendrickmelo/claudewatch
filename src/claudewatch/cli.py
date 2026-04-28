@@ -142,9 +142,9 @@ def main():
     elif args.command == "uninstall":
         uninstall_hook()
     elif args.command is None:
-        # Default: launch the menubar app
-        from claudewatch.app import run
-        run()
+        # Default: launch the menubar app for the current platform
+        from claudewatch.platform import detect
+        detect()()
     else:
         parser.print_help()
 
