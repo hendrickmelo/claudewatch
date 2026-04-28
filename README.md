@@ -1,19 +1,19 @@
 # ClaudeWatch
 
-> **Experimental / Alpha** — This is a personal project I built for my own workflow. It works for me but is rough around the edges. macOS only. Contributions and feedback welcome, but expect breaking changes.
+> **Experimental / Alpha** — This is a personal project I built for my own workflow. It works for me but is rough around the edges. macOS and Windows. Contributions and feedback welcome, but expect breaking changes.
 
-A macOS menubar app that shows your Claude Code rate limit usage and active sessions at a glance.
+A macOS menubar / Windows system-tray app that shows your Claude Code rate limit usage and active sessions at a glance.
 
 ![menubar example](https://img.shields.io/badge/menubar-🟢64%25_↻2h34m-brightgreen)
 
 ## What it shows
 
-**Menubar** (always visible):
-- Rate limit usage with smart burn-rate color indicator
+**Menubar / tray icon** (always visible):
+- Rate limit usage with smart burn-rate color indicator (text on macOS, dynamic icon on Windows)
 - Countdown to 5-hour window reset
 - Claude system status alerts (from status.claude.com)
 
-**Dropdown** (click to expand):
+**Dropdown / context menu** (click to expand):
 - 5-hour and 7-day rate limit details
 - Active sessions grouped by project with T3 thread titles
 - Per-session details (model, context, cost, tokens)
@@ -29,24 +29,38 @@ Other Claude clients (claude.ai web, Claude desktop app) are **not** tracked —
 
 ## Limitations
 
-- **macOS only** — uses native menubar via PyObjC/rumps
+- **macOS and Windows** — Linux support not yet wired up (the core layer is platform-agnostic, but the UI shells are not)
 - **Claude Max subscription** — rate limit data comes from the OAuth usage API, which requires a Claude Max account
 - **Experimental** — built for personal use, lightly tested, expect bugs
-- **~55MB RAM** — Python + PyObjC baseline; a Swift rewrite would be much lighter
+- **~55–80 MB RAM** — Python + PyObjC (macOS) or Python + Pillow/pystray (Windows); a Swift / WinUI rewrite would be much lighter
 
 ## Install
 
-### pip
+### pip / uv (macOS or Windows)
 
 ```bash
 pip install claudewatch
-```
-
-### uv
-
-```bash
+# or
 uv tool install claudewatch
 ```
+
+The wheel is platform-agnostic; pip resolves the right native deps per OS
+(rumps on macOS, pystray + Pillow on Windows). On Windows you also get a
+console-less ``claudewatchw.exe`` entry point that launches the tray
+without flashing a cmd window.
+
+### Windows .exe (no Python required)
+
+Each release attaches a standalone build to the GitHub release page:
+
+```text
+claudewatch-{version}-win-x64.zip
+  claudewatch.exe       # tray app, no console
+  claudewatch-cli.exe   # install / uninstall / --version
+```
+
+Unzip anywhere, run ``claudewatch-cli.exe install``, then double-click
+``claudewatch.exe`` to launch the tray.
 
 ### From source
 
@@ -78,7 +92,7 @@ claudewatch install --chain ~/.claude/statusline.sh
 claudewatch
 ```
 
-The app appears in your macOS menubar.
+The app appears in your macOS menubar (or Windows system tray).
 
 ## How it works
 
@@ -101,7 +115,7 @@ pip uninstall claudewatch      # or: uv tool uninstall claudewatch
 
 ## Requirements
 
-- macOS
-- Python 3.10+
+- macOS or Windows 10/11
+- Python 3.10+ (skip if you use the Windows ``.exe`` distribution)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed
-- `jq` (for the statusline hook)
+- `jq` on macOS (for the bash statusline hook); Windows uses PowerShell's built-in ``ConvertFrom-Json`` and needs no extra tools
