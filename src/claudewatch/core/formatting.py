@@ -54,21 +54,30 @@ def format_time_ago(seconds: float) -> str:
     return f"{hours // 24}d ago"
 
 
-def status_icon(
+# Colored-circle glyphs keyed by status-color name. The Windows icon renderer
+# uses the names to pick fill RGB; the macOS menubar uses the glyphs as text.
+COLOR_GLYPHS = {
+    "green": "\U0001f7e2",   # 🟢
+    "yellow": "\U0001f7e1",  # 🟡
+    "orange": "\U0001f7e0",  # 🟠
+    "red": "\U0001f534",     # 🔴
+    "gray": "⚪",        # ⚪
+}
+
+
+def status_color(
     used_pct: int, resets_at: float = 0, now: float = 0, window_hours: float = 5
 ) -> str:
-    """Return a colored circle based on smart burn-rate projection.
+    """Return the burn-rate-projected color name.
 
-    If we have timing data, projects whether the current burn rate will
-    exhaust the quota before the window resets. Falls back to fixed
-    thresholds if timing data is unavailable.
-
-    ``window_hours`` lets the same projection apply to the 7-day rate-limit
-    window (168 h) as well as the default 5-hour window.
+    Names match COLOR_GLYPHS keys — 'green', 'yellow', 'orange', 'red'.
+    Used by Windows for the tray icon fill and by macOS via status_icon.
+    ``window_hours`` lets the same projection apply to the 7-day window
+    (window_hours=168) as well as the default 5-hour window.
     """
     # Always green under 30%
     if used_pct < 30:
-        return "\U0001f7e2"
+        return "green"
 
     if resets_at and now:
         window_duration = window_hours * 3600
@@ -81,21 +90,28 @@ def status_icon(
             projected = used_pct + burn_rate * time_remaining
 
             if projected < 80:
-                return "\U0001f7e2"  # green — on track
+                return "green"
             elif projected < 100:
-                return "\U0001f7e1"  # yellow — might get close
+                return "yellow"
             elif projected < 130:
-                return "\U0001f7e0"  # orange — likely to hit limit
+                return "orange"
             else:
-                return "\U0001f534"  # red — well over
+                return "red"
 
     # Fallback: no timing data
     if used_pct < 60:
-        return "\U0001f7e1"
+        return "yellow"
     elif used_pct < 85:
-        return "\U0001f7e0"
+        return "orange"
     else:
-        return "\U0001f534"
+        return "red"
+
+
+def status_icon(
+    used_pct: int, resets_at: float = 0, now: float = 0, window_hours: float = 5
+) -> str:
+    """Return the colored-circle glyph for the burn-rate-projected color."""
+    return COLOR_GLYPHS[status_color(used_pct, resets_at, now, window_hours)]
 
 
 def format_tokens(tokens: int) -> str:

@@ -19,6 +19,7 @@ def detect() -> Callable[[], None]:
 
         return run
     if sys.platform == "win32":
-        # Phase B will populate this.
-        raise NotImplementedError("ClaudeWatch's Windows UI is not yet implemented (Phase B).")
+        from claudewatch.platform.windows.ui import run
+
+        return run
     raise NotImplementedError(f"ClaudeWatch does not support sys.platform={sys.platform!r}.")

@@ -13,13 +13,14 @@ from datetime import datetime
 
 from claudewatch.core.domain import short_project_name
 from claudewatch.core.formatting import (
+    COLOR_GLYPHS,
     STATUS_ICONS,
     STATUS_LABELS,
     entrypoint_glyph,
     format_countdown,
     format_time_ago,
     format_tokens,
-    status_icon,
+    status_color,
 )
 
 
@@ -73,7 +74,13 @@ class T3SuperGroup:
 class Snapshot:
     """Immutable view-model assembled once per refresh tick."""
 
-    title_text: str  # menubar text e.g. "🟢12% ↻3h45m  ⚠️"
+    # Menubar / tray title — macOS sets the menubar string, Windows uses
+    # title_text as the tooltip and renders title_pct/color/alert into the
+    # tray icon image.
+    title_text: str  # e.g. "🟢12% ↻3h45m  ⚠️"
+    title_pct: int  # 0–100, used percentage of the 5-hour window
+    title_color: str  # 'green' | 'yellow' | 'orange' | 'red' | 'gray'
+    title_alert: str | None  # status / error overlay glyph, or None
     rate_5h: RateLimit
     rate_7d: RateLimit
     last_active_label: str
@@ -98,9 +105,15 @@ def build_snapshot(
     now: float,
 ) -> Snapshot:
     """Assemble an immutable Snapshot from the raw data sources."""
-    title_text, rate_5h, rate_7d, last_active_label = _build_rate_block(
-        latest, latest_activity, claude_status, now
-    )
+    (
+        title_text,
+        title_pct,
+        title_color,
+        title_alert,
+        rate_5h,
+        rate_7d,
+        last_active_label,
+    ) = _build_rate_block(latest, latest_activity, claude_status, now)
     cs_view = _build_status_view(claude_status)
     (
         active_header,
@@ -113,6 +126,9 @@ def build_snapshot(
     )
     return Snapshot(
         title_text=title_text,
+        title_pct=title_pct,
+        title_color=title_color,
+        title_alert=title_alert,
         rate_5h=rate_5h,
         rate_7d=rate_7d,
         last_active_label=last_active_label,
@@ -133,11 +149,19 @@ def _build_rate_block(
     latest_activity: float,
     claude_status: dict,
     now: float,
-) -> tuple[str, RateLimit, RateLimit, str]:
-    """Return (title_text, rate_5h, rate_7d, last_active_label)."""
+) -> tuple[str, int, str, str | None, RateLimit, RateLimit, str]:
+    """Build the rate-limit + title block.
+
+    Returns:
+        (title_text, title_pct, title_color, title_alert,
+         rate_5h, rate_7d, last_active_label)
+    """
     if not latest:
         return (
             "• --",
+            0,
+            "gray",
+            None,
             RateLimit(label="⚪ 5-hour: no data"),
             RateLimit(label="⚪ 7-day: no data"),
             "No status data yet",
@@ -154,13 +178,15 @@ def _build_rate_block(
     used_7d = seven_day.get("used_percentage", 0)
     resets_at_7d = seven_day.get("resets_at", 0)
 
-    icon = status_icon(used_5h, resets_at_5h, now)
+    color_5h = status_color(used_5h, resets_at_5h, now)
+    color_7d = status_color(used_7d, resets_at_7d, now, window_hours=7 * 24)
+
     s_indicator = claude_status.get("indicator", "none")
     s_icon = STATUS_ICONS.get(s_indicator, "")
     has_errors = bool(claude_status.get("errors"))
-    alert = s_icon or ("⚠️" if has_errors else "")
-    suffix = f"  {alert}" if alert else ""
-    title_text = f"{icon}{used_5h}% ↻{format_countdown(countdown_5h)}{suffix}"
+    title_alert = s_icon or ("⚠️" if has_errors else None)
+    suffix = f"  {title_alert}" if title_alert else ""
+    title_text = f"{COLOR_GLYPHS[color_5h]}{used_5h}% ↻{format_countdown(countdown_5h)}{suffix}"
 
     reset_time_5h = (
         datetime.fromtimestamp(resets_at_5h).strftime("%-I:%M %p") if resets_at_5h else "?"
@@ -169,15 +195,17 @@ def _build_rate_block(
         datetime.fromtimestamp(resets_at_7d).strftime("%a %-I:%M %p") if resets_at_7d else "?"
     )
 
-    icon_5h = status_icon(used_5h, resets_at_5h, now)
-    icon_7d = status_icon(used_7d, resets_at_7d, now, window_hours=7 * 24)
-    rate_5h = RateLimit(label=f"{icon_5h} 5-hour:  {used_5h}% used  (resets {reset_time_5h})")
-    rate_7d = RateLimit(label=f"{icon_7d} 7-day:   {used_7d}% used  (resets {reset_time_7d})")
+    rate_5h = RateLimit(
+        label=f"{COLOR_GLYPHS[color_5h]} 5-hour:  {used_5h}% used  (resets {reset_time_5h})"
+    )
+    rate_7d = RateLimit(
+        label=f"{COLOR_GLYPHS[color_7d]} 7-day:   {used_7d}% used  (resets {reset_time_7d})"
+    )
 
     age = now - latest_activity if latest_activity > 0 else now - latest["_mtime"]
     last_active_label = f"Last active: {format_time_ago(age)}"
 
-    return title_text, rate_5h, rate_7d, last_active_label
+    return title_text, used_5h, color_5h, title_alert, rate_5h, rate_7d, last_active_label
 
 
 def _build_status_view(claude_status: dict) -> ClaudeStatusView:
