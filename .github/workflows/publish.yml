@@ -49,6 +49,82 @@ jobs:
           name: dist
           path: dist/
 
+  build-windows-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Set version from tag or input
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          if ($env:INPUT_VERSION) {
+            if (-not ($env:INPUT_VERSION -match '^[0-9]+\.[0-9]+\.[0-9]+([.a-zA-Z0-9-]+)?$')) {
+              Write-Error "Invalid version format: $env:INPUT_VERSION"
+              exit 1
+            }
+            $version = $env:INPUT_VERSION
+          } else {
+            $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          }
+          (Get-Content pyproject.toml) -replace '^version = .*', "version = ""$version""" `
+            | Set-Content pyproject.toml
+          Write-Host "Building version: $version"
+
+      - name: Sync with windows + dev extras
+        shell: pwsh
+        run: uv sync --extra windows --extra dev
+
+      - name: Build with PyInstaller
+        shell: pwsh
+        run: uv run pyinstaller packaging/windows/claudewatch.spec --noconfirm
+
+      - name: Read version for zip name
+        id: version
+        shell: pwsh
+        run: |
+          $line = Select-String -Path pyproject.toml -Pattern '^version = "(.*)"'
+          $v = $line.Matches.Groups[1].Value
+          "value=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Zip distribution
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          $zipName = "claudewatch-$env:VERSION-win-x64.zip"
+          Compress-Archive -Path dist/claudewatch/* -DestinationPath "dist/$zipName"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: claudewatch-windows-exe
+          path: dist/claudewatch-*-win-x64.zip
+
+  attach-windows-exe:
+    # On release events, download the Windows .exe zip from build-windows-exe
+    # and attach it to the GitHub release as a downloadable asset.
+    if: github.event_name == 'release'
+    needs: build-windows-exe
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: claudewatch-windows-exe
+          path: dist/
+
+      - name: Attach Windows .exe zip to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          gh release upload "$REF_NAME" dist/claudewatch-*-win-x64.zip
+
   test-publish:
     if: github.event_name == 'workflow_dispatch'
     needs: build
