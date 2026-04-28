@@ -14,8 +14,13 @@ SETTINGS_FILE = CLAUDE_DIR / "settings.json"
 
 
 def get_hook_path() -> Path:
-    """Get the installed path of the statusline hook script."""
-    return Path(files("claudewatch").joinpath("statusline_hook.sh"))
+    """Get the installed path of the statusline hook script for this platform."""
+    if sys.platform == "win32":
+        # Phase B will ship platform/windows/hook.ps1 here.
+        raise NotImplementedError(
+            "Windows statusline hook is not yet implemented (Phase B)."
+        )
+    return Path(files("claudewatch.platform.macos").joinpath("hook.sh"))
 
 
 def install_hook(chain: str | None = None):
