@@ -117,8 +117,8 @@ def _build_rate_block(
     if not latest:
         return (
             "• --",
-            RateLimit(label="5-hour: no data"),
-            RateLimit(label="7-day: no data"),
+            RateLimit(label="⚪ 5-hour: no data"),
+            RateLimit(label="⚪ 7-day: no data"),
             "No status data yet",
         )
 
@@ -148,8 +148,10 @@ def _build_rate_block(
         datetime.fromtimestamp(resets_at_7d).strftime("%a %-I:%M %p") if resets_at_7d else "?"
     )
 
-    rate_5h = RateLimit(label=f"5-hour:  {used_5h}% used  (resets {reset_time_5h})")
-    rate_7d = RateLimit(label=f"7-day:   {used_7d}% used  (resets {reset_time_7d})")
+    icon_5h = status_icon(used_5h, resets_at_5h, now)
+    icon_7d = status_icon(used_7d, resets_at_7d, now, window_hours=7 * 24)
+    rate_5h = RateLimit(label=f"{icon_5h} 5-hour:  {used_5h}% used  (resets {reset_time_5h})")
+    rate_7d = RateLimit(label=f"{icon_7d} 7-day:   {used_7d}% used  (resets {reset_time_7d})")
 
     age = now - latest_activity if latest_activity > 0 else now - latest["_mtime"]
     last_active_label = f"Last active: {format_time_ago(age)}"

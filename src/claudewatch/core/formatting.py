@@ -54,19 +54,24 @@ def format_time_ago(seconds: float) -> str:
     return f"{hours // 24}d ago"
 
 
-def status_icon(used_pct: int, resets_at: float = 0, now: float = 0) -> str:
+def status_icon(
+    used_pct: int, resets_at: float = 0, now: float = 0, window_hours: float = 5
+) -> str:
     """Return a colored circle based on smart burn-rate projection.
 
     If we have timing data, projects whether the current burn rate will
     exhaust the quota before the window resets. Falls back to fixed
     thresholds if timing data is unavailable.
+
+    ``window_hours`` lets the same projection apply to the 7-day rate-limit
+    window (168 h) as well as the default 5-hour window.
     """
     # Always green under 30%
     if used_pct < 30:
         return "\U0001f7e2"
 
     if resets_at and now:
-        window_duration = 5 * 3600
+        window_duration = window_hours * 3600
         window_start = resets_at - window_duration
         time_elapsed = now - window_start
         time_remaining = resets_at - now
