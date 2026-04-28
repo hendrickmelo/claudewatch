@@ -56,8 +56,12 @@ windows = ["pystray>=0.19", "Pillow>=10"]
 dev = [
     "Pillow>=10",  # icon_render tests; ships unconditionally on Windows already
     "pyinstaller>=6; sys_platform == 'win32'",
+    "pytest>=8",
     "ruff",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
