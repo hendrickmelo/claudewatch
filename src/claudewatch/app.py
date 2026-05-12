@@ -18,7 +18,7 @@ STATUS_DIR = CLAUDE_DIR / "status"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 
 POLL_INTERVAL = 5  # seconds
-API_POLL_INTERVAL = 60  # 1 minute
+API_POLL_INTERVAL = 60  # seconds
 API_STALE_THRESHOLD = 300  # only poll API if no status update in 5 minutes
 API_LOG = Path.home() / ".claude" / "claudewatch-api.log"
 
@@ -50,12 +50,11 @@ def _log_api(msg: str):
         pass
 
 
-def fetch_oauth_usage() -> dict | None:
-    """Fetch rate limit usage from the Anthropic OAuth API.
+OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
-    Returns a dict compatible with the rate_limits format in status files,
-    or None if the request fails (429, auth error, etc.).
-    """
+
+def _read_keychain_creds() -> dict | None:
+    """Read Claude Code credentials from macOS Keychain."""
     try:
         result = subprocess.run(
             ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
@@ -66,14 +65,103 @@ def fetch_oauth_usage() -> dict | None:
         if result.returncode != 0:
             _log_api("ERROR  keychain read failed")
             return None
+        return json.loads(result.stdout)
+    except (json.JSONDecodeError, subprocess.TimeoutExpired, OSError) as e:
+        _log_api(f"ERROR  keychain: {type(e).__name__}: {e}")
+        return None
 
-        creds = json.loads(result.stdout)
-        token = creds.get("claudeAiOauth", {}).get("accessToken")
-        if not token:
-            _log_api("ERROR  no accessToken in keychain")
+
+def _write_keychain_creds(creds: dict) -> bool:
+    """Write updated credentials back to macOS Keychain."""
+    try:
+        creds_json = json.dumps(creds)
+        subprocess.run(
+            [
+                "security",
+                "delete-generic-password",
+                "-s",
+                "Claude Code-credentials",
+            ],
+            capture_output=True,
+            timeout=5,
+        )
+        result = subprocess.run(
+            [
+                "security",
+                "add-generic-password",
+                "-s",
+                "Claude Code-credentials",
+                "-a",
+                "",
+                "-w",
+                creds_json,
+                "-U",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, OSError) as e:
+        _log_api(f"ERROR  keychain write: {type(e).__name__}: {e}")
+        return False
+
+
+def _refresh_oauth_token(creds: dict) -> str | None:
+    """Refresh the OAuth access token. Returns new token or None on failure."""
+    oauth = creds.get("claudeAiOauth", {})
+    refresh_token = oauth.get("refreshToken")
+    if not refresh_token:
+        _log_api("ERROR  no refreshToken in keychain")
+        return None
+
+    try:
+        body = json.dumps({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": OAUTH_CLIENT_ID,
+        }).encode()
+        req = urllib.request.Request(
+            "https://console.anthropic.com/v1/oauth/token",
+            data=body,
+            headers={"Content-Type": "application/json", "User-Agent": "ClaudeCode/2.1"},
+            method="POST",
+        )
+        resp = urllib.request.urlopen(req, timeout=10)
+        data = json.loads(resp.read())
+
+        new_access = data.get("access_token")
+        new_refresh = data.get("refresh_token")
+        if not new_access:
+            _log_api("ERROR  token refresh returned no access_token")
             return None
 
-        _log_api("GET    /api/oauth/usage")
+        oauth["accessToken"] = new_access
+        if new_refresh:
+            oauth["refreshToken"] = new_refresh
+        if "expires_in" in data:
+            expires_at = datetime.now(timezone.utc).timestamp() + data["expires_in"]
+            oauth["expiresAt"] = int(expires_at * 1000)
+        creds["claudeAiOauth"] = oauth
+
+        if _write_keychain_creds(creds):
+            _log_api("OK     token refreshed")
+            return new_access
+        else:
+            _log_api("ERROR  token refreshed but keychain write failed")
+            return new_access  # still usable this session
+    except urllib.error.HTTPError as e:
+        _log_api(f"ERROR  token refresh HTTP {e.code}")
+        return None
+    except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
+        _log_api(f"ERROR  token refresh: {type(e).__name__}: {e}")
+        return None
+
+
+def _call_usage_api(token: str) -> dict | str | None:
+    """Call the usage API with a given token. Returns data dict, "rate_limited", or None."""
+    _log_api("GET    /api/oauth/usage")
+    try:
         req = urllib.request.Request(
             "https://api.anthropic.com/api/oauth/usage",
             headers={
@@ -113,13 +201,42 @@ def fetch_oauth_usage() -> dict | None:
         }
     except urllib.error.HTTPError as e:
         _log_api(f"HTTP {e.code}  {e.reason}")
+        if e.code == 429:
+            return "rate_limited"
         return None
     except urllib.error.URLError as e:
         _log_api(f"ERROR  network: {e.reason}")
         return None
-    except (json.JSONDecodeError, subprocess.TimeoutExpired, KeyError, OSError) as e:
+    except (json.JSONDecodeError, KeyError, OSError) as e:
         _log_api(f"ERROR  {type(e).__name__}: {e}")
         return None
+
+
+def fetch_oauth_usage() -> dict | str | None:
+    """Fetch rate limit usage from the Anthropic OAuth API.
+
+    Returns a dict on success, "rate_limited" on 429, or None on other failures.
+    On 429, attempts a token refresh and retries once.
+    """
+    creds = _read_keychain_creds()
+    if not creds:
+        return None
+
+    token = creds.get("claudeAiOauth", {}).get("accessToken")
+    if not token:
+        _log_api("ERROR  no accessToken in keychain")
+        return None
+
+    result = _call_usage_api(token)
+    if result != "rate_limited":
+        return result
+
+    _log_api("REFRESH  attempting token refresh after 429")
+    new_token = _refresh_oauth_token(creds)
+    if not new_token:
+        return "rate_limited"
+
+    return _call_usage_api(new_token)
 
 
 def _is_real_error(err: str) -> bool:
@@ -510,6 +627,8 @@ class ClaudeWatchApp(rumps.App):
         self._session_keys: list[str] = []
         self._api_rate_limits: dict | None = self._load_api_cache()
         self._last_api_poll = 0.0  # always fetch fresh data on startup
+        self._last_api_success = 0.0
+        self._api_backoff = 0  # exponential backoff exponent for 429s
         self._last_status_poll = 0.0
         self._claude_status: dict = {
             "indicator": "none",
@@ -626,24 +745,30 @@ class ClaudeWatchApp(rumps.App):
         # Poll OAuth API if:
         # - user manually clicked Refresh Now
         # - startup (last_api_poll == 0, always get fresh data regardless of cache age)
-        # - data is stale AND interval has passed
+        # - data is stale AND interval has passed (with backoff on 429)
         force = sender is not None and not isinstance(sender, rumps.Timer)
         is_startup = self._last_api_poll == 0.0
         latest_age = now - latest["_mtime"] if latest else float("inf")
+        poll_interval = API_POLL_INTERVAL * (2**self._api_backoff)
         if (
             force
             or is_startup
-            or (latest_age > API_STALE_THRESHOLD and now - self._last_api_poll > API_POLL_INTERVAL)
+            or (latest_age > API_STALE_THRESHOLD and now - self._last_api_poll > poll_interval)
         ):
             api_data = fetch_oauth_usage()
-            if api_data:
+            self._last_api_poll = now
+            if isinstance(api_data, dict):
                 api_data["_mtime"] = now
                 api_data["_session_id"] = "_api"
                 self._api_rate_limits = api_data
-                self._last_api_poll = now
+                self._api_backoff = 0
+                self._last_api_success = now
                 self._save_api_poll_time(now)
                 self._save_api_cache(api_data)
                 latest = api_data
+            elif api_data == "rate_limited":
+                self._api_backoff = min(self._api_backoff + 1, 6)  # max ~16 min
+                _log_api(f"BACKOFF  next poll in {poll_interval * 2:.0f}s")
 
         # Per-session statuses: only for alive sessions within the window
         sessions = get_active_sessions()
@@ -685,10 +810,14 @@ class ClaudeWatchApp(rumps.App):
 
         used_7d = seven_day.get("used_percentage", 0)
         resets_at_7d = seven_day.get("resets_at", 0)
-        countdown_7d = max(0, resets_at_7d - now)
 
-        # Menubar title
-        icon = status_icon(used_5h, resets_at_5h, now)
+        # Detect stale data (API in backoff / error state)
+        data_age = now - latest.get("_mtime", 0)
+        is_stale = self._api_backoff > 0 and data_age > API_STALE_THRESHOLD
+
+        # Menubar title \u2014 show \u26aa when data is stale
+        countdown_5h = max(0, resets_at_5h - now)
+        icon = "\u26aa" if is_stale else status_icon(used_5h, resets_at_5h, now)
 
         # Append status icon to title if Claude is having issues or session errors
         cs = self._claude_status
@@ -707,10 +836,27 @@ class ClaudeWatchApp(rumps.App):
             datetime.fromtimestamp(resets_at_7d).strftime("%a %-I:%M %p") if resets_at_7d else "?"
         )
 
-        icon_5h = status_icon(used_5h, resets_at_5h, now)
-        icon_7d = status_icon(used_7d, resets_at_7d, now, window_hours=7 * 24)
+        icon_5h = "\u26aa" if is_stale else status_icon(used_5h, resets_at_5h, now)
+        icon_7d = (
+            "\u26aa" if is_stale else status_icon(used_7d, resets_at_7d, now, window_hours=7 * 24)
+        )
         self.rate_5h.title = f"{icon_5h} 5-hour:  {used_5h}% used  (resets {reset_time_5h})"
         self.rate_7d.title = f"{icon_7d} 7-day:   {used_7d}% used  (resets {reset_time_7d})"
+
+        # Tooltip: show last successful fetch time
+        if self._last_api_success:
+            ago = format_time_ago(now - self._last_api_success)
+            tooltip = f"Stale \u2014 last updated {ago}" if is_stale else f"Last updated {ago}"
+        else:
+            tooltip = "No successful API fetch yet"
+        self.rate_5h._menuitem.setToolTip_(tooltip)
+        self.rate_7d._menuitem.setToolTip_(tooltip)
+
+        # Status bar tooltip (hover the menubar item itself)
+        try:
+            self._nsapp.nsstatusitem.button().setToolTip_(tooltip)
+        except AttributeError:
+            pass
 
         # Status item
         incidents = cs.get("incidents", [])
