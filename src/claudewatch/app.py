@@ -663,7 +663,7 @@ class ClaudeWatchApp(rumps.App):
             None,
             self.recent_header,
             None,
-            rumps.MenuItem("Refresh Now", callback=self.refresh),
+            rumps.MenuItem("🔄 Refresh Now", callback=self.refresh),
             rumps.MenuItem("Quit", callback=rumps.quit_application),
         ]
 
