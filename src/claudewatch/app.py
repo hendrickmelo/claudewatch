@@ -211,7 +211,9 @@ def fetch_oauth_usage() -> dict | str | None:
     """Fetch rate limit usage from the Anthropic OAuth API.
 
     Returns a dict on success, "rate_limited" on 429, or None on other failures.
-    On 401 (expired access token) or 429, refreshes the token and retries once.
+    On 401 (expired access token) the token is refreshed and the call retried
+    once. A 429 is a rate limit, not an auth failure, so it is surfaced as-is
+    for the caller to back off on — no refresh is attempted.
     """
     creds = _read_keychain_creds()
     if not creds:
@@ -223,15 +225,18 @@ def fetch_oauth_usage() -> dict | str | None:
         return None
 
     result = _call_usage_api(token)
-    if result not in ("rate_limited", "unauthorized"):
+    if result == "rate_limited":
+        # 429 is a rate limit, not an auth failure — refreshing the token does
+        # nothing but burn requests. Surface it so the caller just backs off.
+        return "rate_limited"
+    if result != "unauthorized":
         return result
 
-    _log_api(f"REFRESH  attempting token refresh after {result}")
+    # 401: the access token expired — refresh it once and retry.
+    _log_api("REFRESH  attempting token refresh after unauthorized")
     new_token = _refresh_oauth_token(creds)
     if not new_token:
-        # 429 keeps its dedicated backoff signal; a failed 401 refresh falls
-        # through to the generic (None) backoff path in the caller.
-        return "rate_limited" if result == "rate_limited" else None
+        return None
 
     retried = _call_usage_api(new_token)
     # "unauthorized" is internal to the retry trigger; callers only understand

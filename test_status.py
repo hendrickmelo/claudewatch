@@ -158,9 +158,10 @@ check("401 with failed refresh → None", res, None)
 res, _ = run_fetch(["unauthorized", "unauthorized"], "fresh-token")
 check("persistent 401 normalised to None", res, None)
 
-# 429 path still refreshes and retries (unchanged behaviour)
-res, _ = run_fetch(["rate_limited", GOOD], "fresh-token")
-check("429 still triggers refresh + retry", res, GOOD)
+# 429 is a rate limit, not an auth failure → surface it, do NOT refresh/retry
+res, calls = run_fetch(["rate_limited", GOOD], "fresh-token")
+check("429 surfaced as rate_limited", res, "rate_limited")
+check("429 does not refresh or retry", calls, ["stale"])
 
 # Healthy first call → returns immediately, no refresh
 res, calls = run_fetch([GOOD], None)
