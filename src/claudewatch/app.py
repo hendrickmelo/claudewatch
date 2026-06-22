@@ -1,6 +1,7 @@
 """ClaudeWatch menubar application."""
 
 import contextlib
+import getpass
 import json
 import os
 import sqlite3
@@ -53,12 +54,19 @@ def _log_api(msg: str):
 
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
+# Claude Code stores its OAuth credentials in this keychain item, keyed by the
+# macOS username. Reading with no account returns a stale orphan item left by
+# older Claude Code versions, so we must match on the username.
+KEYCHAIN_SERVICE = "Claude Code-credentials"
+KEYCHAIN_ACCOUNT = getpass.getuser()
+
 
 def _read_keychain_creds() -> dict | None:
     """Read Claude Code credentials from macOS Keychain."""
     try:
         result = subprocess.run(
-            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE,
+             "-a", KEYCHAIN_ACCOUNT, "-w"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -83,9 +91,9 @@ def _write_keychain_creds(creds: dict) -> bool:
                 "security",
                 "add-generic-password",
                 "-s",
-                "Claude Code-credentials",
+                KEYCHAIN_SERVICE,
                 "-a",
-                "",
+                KEYCHAIN_ACCOUNT,
                 "-w",
                 creds_json,
                 "-U",
