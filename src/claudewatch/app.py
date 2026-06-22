@@ -1,5 +1,6 @@
 """ClaudeWatch menubar application."""
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -75,16 +76,8 @@ def _write_keychain_creds(creds: dict) -> bool:
     """Write updated credentials back to macOS Keychain."""
     try:
         creds_json = json.dumps(creds)
-        subprocess.run(
-            [
-                "security",
-                "delete-generic-password",
-                "-s",
-                "Claude Code-credentials",
-            ],
-            capture_output=True,
-            timeout=5,
-        )
+        # `-U` updates the existing item in place; no need to delete first
+        # (deleting first risks wiping the refresh token if `add` then fails).
         result = subprocess.run(
             [
                 "security",
@@ -363,10 +356,6 @@ def status_icon(
     exhaust the quota before the window resets. Falls back to fixed
     thresholds if timing data is unavailable.
     """
-    # Always green under 30%
-    if used_pct < 30:
-        return "\U0001f7e2"
-
     if resets_at and now:
         window_duration = window_hours * 3600
         window_start = resets_at - window_duration
@@ -386,7 +375,11 @@ def status_icon(
             else:
                 return "\U0001f534"  # red — well over
 
-    # Fallback: no timing data
+    # Fallback: no timing data — apply the <30% shortcut only here, since
+    # for long windows (e.g. 7d) the projection above may classify low
+    # percentages as red when the early-week burn rate is still high.
+    if used_pct < 30:
+        return "\U0001f7e2"
     if used_pct < 60:
         return "\U0001f7e1"
     elif used_pct < 85:
@@ -682,10 +675,8 @@ class ClaudeWatchApp(rumps.App):
 
     def _save_api_poll_time(self, ts: float):
         """Persist the last API poll timestamp to disk."""
-        try:
+        with contextlib.suppress(OSError):
             self._API_POLL_CACHE.write_text(str(ts))
-        except OSError:
-            pass
 
     def _load_api_cache(self) -> dict | None:
         """Load cached API rate limit data from disk."""
@@ -696,10 +687,8 @@ class ClaudeWatchApp(rumps.App):
 
     def _save_api_cache(self, data: dict):
         """Persist API rate limit data to disk."""
-        try:
+        with contextlib.suppress(OSError):
             self._API_DATA_CACHE.write_text(json.dumps(data))
-        except OSError:
-            pass
 
     def refresh(self, sender=None):
         """Poll status files and update the menubar."""
@@ -767,8 +756,15 @@ class ClaudeWatchApp(rumps.App):
                 self._save_api_cache(api_data)
                 latest = api_data
             elif api_data == "rate_limited":
-                self._api_backoff = min(self._api_backoff + 1, 6)  # max ~16 min
-                _log_api(f"BACKOFF  next poll in {poll_interval * 2:.0f}s")
+                self._api_backoff = min(self._api_backoff + 1, 6)  # max ~64 min
+                next_interval = API_POLL_INTERVAL * (2**self._api_backoff)
+                _log_api(f"BACKOFF  next poll in {next_interval:.0f}s")
+            elif api_data is None:
+                # Treat non-429 failures (network / 5xx / parse) the same as
+                # 429 so the cache ages out and the UI shows the stale icon.
+                self._api_backoff = min(self._api_backoff + 1, 6)
+                next_interval = API_POLL_INTERVAL * (2**self._api_backoff)
+                _log_api(f"BACKOFF  next poll in {next_interval:.0f}s (non-429)")
 
         # Per-session statuses: only for alive sessions within the window
         sessions = get_active_sessions()
@@ -816,7 +812,6 @@ class ClaudeWatchApp(rumps.App):
         is_stale = self._api_backoff > 0 and data_age > API_STALE_THRESHOLD
 
         # Menubar title \u2014 show \u26aa when data is stale
-        countdown_5h = max(0, resets_at_5h - now)
         icon = "\u26aa" if is_stale else status_icon(used_5h, resets_at_5h, now)
 
         # Append status icon to title if Claude is having issues or session errors
@@ -849,14 +844,15 @@ class ClaudeWatchApp(rumps.App):
             tooltip = f"Stale \u2014 last updated {ago}" if is_stale else f"Last updated {ago}"
         else:
             tooltip = "No successful API fetch yet"
-        self.rate_5h._menuitem.setToolTip_(tooltip)
-        self.rate_7d._menuitem.setToolTip_(tooltip)
+        # `_menuitem` is private rumps state; guard in case it's renamed or
+        # not yet attached, matching the nsstatusitem guard below.
+        with contextlib.suppress(AttributeError):
+            self.rate_5h._menuitem.setToolTip_(tooltip)
+            self.rate_7d._menuitem.setToolTip_(tooltip)
 
         # Status bar tooltip (hover the menubar item itself)
-        try:
+        with contextlib.suppress(AttributeError):
             self._nsapp.nsstatusitem.button().setToolTip_(tooltip)
-        except AttributeError:
-            pass
 
         # Status item
         incidents = cs.get("incidents", [])
@@ -892,10 +888,8 @@ class ClaudeWatchApp(rumps.App):
 
         # Remove old dynamic session items
         for key in list(self._session_keys):
-            try:
+            with contextlib.suppress(KeyError):
                 del self.menu[key]
-            except KeyError:
-                pass
         self._session_keys.clear()
 
         # Split sessions into active and recent
