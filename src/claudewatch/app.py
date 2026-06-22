@@ -196,6 +196,8 @@ def _call_usage_api(token: str) -> dict | str | None:
         _log_api(f"HTTP {e.code}  {e.reason}")
         if e.code == 429:
             return "rate_limited"
+        if e.code == 401:
+            return "unauthorized"  # expired access token — caller refreshes
         return None
     except urllib.error.URLError as e:
         _log_api(f"ERROR  network: {e.reason}")
@@ -209,7 +211,7 @@ def fetch_oauth_usage() -> dict | str | None:
     """Fetch rate limit usage from the Anthropic OAuth API.
 
     Returns a dict on success, "rate_limited" on 429, or None on other failures.
-    On 429, attempts a token refresh and retries once.
+    On 401 (expired access token) or 429, refreshes the token and retries once.
     """
     creds = _read_keychain_creds()
     if not creds:
@@ -221,15 +223,20 @@ def fetch_oauth_usage() -> dict | str | None:
         return None
 
     result = _call_usage_api(token)
-    if result != "rate_limited":
+    if result not in ("rate_limited", "unauthorized"):
         return result
 
-    _log_api("REFRESH  attempting token refresh after 429")
+    _log_api(f"REFRESH  attempting token refresh after {result}")
     new_token = _refresh_oauth_token(creds)
     if not new_token:
-        return "rate_limited"
+        # 429 keeps its dedicated backoff signal; a failed 401 refresh falls
+        # through to the generic (None) backoff path in the caller.
+        return "rate_limited" if result == "rate_limited" else None
 
-    return _call_usage_api(new_token)
+    retried = _call_usage_api(new_token)
+    # "unauthorized" is internal to the retry trigger; callers only understand
+    # dict / "rate_limited" / None, so normalise a still-401 retry to None.
+    return None if retried == "unauthorized" else retried
 
 
 def _is_real_error(err: str) -> bool:

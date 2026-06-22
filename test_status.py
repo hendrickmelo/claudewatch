@@ -17,10 +17,15 @@ from claudewatch.app import (
 
 # ── Helper ────────────────────────────────────────────────────────────────────
 
+_failures = 0
+
+
 def check(label: str, got, expected):
+    global _failures
     ok = "✅" if got == expected else "❌"
     print(f"  {ok} {label}")
     if got != expected:
+        _failures += 1
         print(f"       got:      {got!r}")
         print(f"       expected: {expected!r}")
 
@@ -106,4 +111,60 @@ if result["errors"]:
     for e in result["errors"]:
         print(f"    - {e}")
 
+# ── 6. OAuth refresh-on-401 regression (fetch_oauth_usage) ───────────────────
+# Guards the bug where a 401 (expired access token) never triggered a token
+# refresh — only 429 did — so the menubar showed stale 0% / "resets ?" forever.
+
+print("\n── OAuth refresh on 401 (fetch_oauth_usage) ──")
+import claudewatch.app as app
+
+GOOD = {
+    "rate_limits": {"five_hour": {"used_percentage": 12, "resets_at": 0}},
+    "_source": "oauth_api",
+}
+
+
+def run_fetch(call_results, refresh_token):
+    """Drive fetch_oauth_usage with a scripted sequence of _call_usage_api
+    return values and a _refresh_oauth_token result. Returns (result, calls),
+    where calls is the list of tokens passed to _call_usage_api."""
+    seq = list(call_results)
+    calls = []
+
+    def fake_call(token):
+        calls.append(token)
+        return seq.pop(0)
+
+    orig = (app._read_keychain_creds, app._call_usage_api, app._refresh_oauth_token)
+    app._read_keychain_creds = lambda: {"claudeAiOauth": {"accessToken": "stale"}}
+    app._call_usage_api = fake_call
+    app._refresh_oauth_token = lambda creds: refresh_token
+    try:
+        return app.fetch_oauth_usage(), calls
+    finally:
+        (app._read_keychain_creds, app._call_usage_api, app._refresh_oauth_token) = orig
+
+
+# 401 → refresh succeeds → retry with new token → returns usage dict
+res, calls = run_fetch(["unauthorized", GOOD], "fresh-token")
+check("401 triggers refresh + retry", res, GOOD)
+check("401 retry uses refreshed token", calls, ["stale", "fresh-token"])
+
+# 401 → refresh fails → None (caller backs off and shows the stale icon)
+res, _ = run_fetch(["unauthorized"], None)
+check("401 with failed refresh → None", res, None)
+
+# 401 persists after refresh → normalised to None, internal sentinel not leaked
+res, _ = run_fetch(["unauthorized", "unauthorized"], "fresh-token")
+check("persistent 401 normalised to None", res, None)
+
+# 429 path still refreshes and retries (unchanged behaviour)
+res, _ = run_fetch(["rate_limited", GOOD], "fresh-token")
+check("429 still triggers refresh + retry", res, GOOD)
+
+# Healthy first call → returns immediately, no refresh
+res, calls = run_fetch([GOOD], None)
+check("200 returns without refresh", (res, calls), (GOOD, ["stale"]))
+
 print()
+sys.exit(1 if _failures else 0)
