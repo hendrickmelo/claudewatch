@@ -116,12 +116,17 @@ def _write_keychain_creds(creds: dict) -> bool:
 
 
 def _refresh_oauth_token(creds: dict) -> str | None:
-    """Refresh the OAuth access token. Returns new token or None on failure."""
+    """Refresh the OAuth access token.
+
+    Returns the new token, "rejected" when the OAuth endpoint refuses the
+    refresh token (or there is none) — meaning the session is dead and only a
+    fresh `claude` login can fix it — or None on transient failures.
+    """
     oauth = creds.get("claudeAiOauth", {})
     refresh_token = oauth.get("refreshToken")
     if not refresh_token:
         _log_api("ERROR  no refreshToken in keychain")
-        return None
+        return "rejected"
 
     try:
         body = json.dumps(
@@ -162,7 +167,9 @@ def _refresh_oauth_token(creds: dict) -> str | None:
             return new_access  # still usable this session
     except urllib.error.HTTPError as e:
         _log_api(f"ERROR  token refresh HTTP {e.code}")
-        return None
+        # 400/401/403 mean the refresh token itself was refused (rotated or
+        # revoked) — no retry can succeed, the user has to log in again.
+        return "rejected" if e.code in (400, 401, 403) else None
     except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
         _log_api(f"ERROR  token refresh: {type(e).__name__}: {e}")
         return None
@@ -227,19 +234,22 @@ def _call_usage_api(token: str) -> dict | str | None:
 def fetch_oauth_usage() -> dict | str | None:
     """Fetch rate limit usage from the Anthropic OAuth API.
 
-    Returns a dict on success, "rate_limited" on 429, or None on other failures.
-    On 401 (expired access token) the token is refreshed and the call retried
-    once. A 429 is a rate limit, not an auth failure, so it is surfaced as-is
-    for the caller to back off on — no refresh is attempted.
+    Returns a dict on success, "rate_limited" on 429, "needs_login" when the
+    OAuth session is dead (no usable credentials, or the refresh token was
+    rejected — only a fresh `claude` login can recover), or None on transient
+    failures. On 401 (expired access token) the token is refreshed and the
+    call retried once. A 429 is a rate limit, not an auth failure, so it is
+    surfaced as-is for the caller to back off on — no refresh is attempted.
     """
     creds = _read_keychain_creds()
     if not creds:
-        return None
+        _log_api("NEEDS-LOGIN  no credentials in keychain")
+        return "needs_login"
 
     token = creds.get("claudeAiOauth", {}).get("accessToken")
     if not token:
-        _log_api("ERROR  no accessToken in keychain")
-        return None
+        _log_api("NEEDS-LOGIN  no accessToken in keychain")
+        return "needs_login"
 
     result = _call_usage_api(token)
     if result == "rate_limited":
@@ -252,13 +262,26 @@ def fetch_oauth_usage() -> dict | str | None:
     # 401: the access token expired — refresh it once and retry.
     _log_api("REFRESH  attempting token refresh after unauthorized")
     new_token = _refresh_oauth_token(creds)
+    if new_token == "rejected":
+        _log_api("NEEDS-LOGIN  refresh token rejected")
+        return "needs_login"
     if not new_token:
         return None
 
     retried = _call_usage_api(new_token)
-    # "unauthorized" is internal to the retry trigger; callers only understand
-    # dict / "rate_limited" / None, so normalise a still-401 retry to None.
-    return None if retried == "unauthorized" else retried
+    if retried == "unauthorized":
+        # A freshly-minted token was still refused — the session is dead.
+        _log_api("NEEDS-LOGIN  still 401 after refresh")
+        return "needs_login"
+    return retried
+
+
+def _login_recovered(failed_token: str | None) -> bool:
+    """Return True once the keychain holds a different access token than the
+    one that last failed — i.e. the user has logged in again."""
+    creds = _read_keychain_creds()
+    token = (creds or {}).get("claudeAiOauth", {}).get("accessToken")
+    return bool(token) and token != failed_token
 
 
 def _is_real_error(err: str) -> bool:
