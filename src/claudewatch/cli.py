@@ -59,7 +59,7 @@ def install_hook(chain: str | None = None):
             if response != "y":
                 # Auto-chain with existing
                 command = f"{hook_dest} --chain {existing_cmd}"
-                print(f"Chaining with existing statusline.")
+                print("Chaining with existing statusline.")
 
     # Update settings
     settings["statusLine"] = {"type": "command", "command": command}
@@ -131,9 +131,7 @@ def main():
     )
 
     # uninstall
-    subparsers.add_parser(
-        "uninstall", help="Remove the statusline hook from Claude Code"
-    )
+    subparsers.add_parser("uninstall", help="Remove the statusline hook from Claude Code")
 
     args = parser.parse_args()
 
@@ -144,6 +142,7 @@ def main():
     elif args.command is None:
         # Default: launch the menubar app
         from claudewatch.app import run
+
         run()
     else:
         parser.print_help()

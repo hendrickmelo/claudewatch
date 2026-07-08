@@ -1,11 +1,13 @@
 """ClaudeWatch menubar application."""
 
+import contextlib
+import getpass
 import json
 import os
 import sqlite3
 import subprocess
-import urllib.request
 import urllib.error
+import urllib.request
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,18 +20,22 @@ STATUS_DIR = CLAUDE_DIR / "status"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 
 POLL_INTERVAL = 5  # seconds
-API_POLL_INTERVAL = 60  # 1 minute
+API_POLL_INTERVAL = 60  # seconds
 API_STALE_THRESHOLD = 300  # only poll API if no status update in 5 minutes
+KEYCHAIN_WATCH_INTERVAL = 30  # needs-login: how often to check keychain for a new login
+
+LOGIN_TITLE = "🔑 login"
+LOGIN_STATUS_LINE = "🔑 Claude login expired — run claude and log in again"
 API_LOG = Path.home() / ".claude" / "claudewatch-api.log"
 
-STATUS_PAGE_URL = "https://status.anthropic.com/api/v2/summary.json"
+STATUS_PAGE_URL = "https://status.claude.com/api/v2/summary.json"
 STATUS_POLL_INTERVAL = 60  # 1 minute
 
 STATUS_ICONS = {
     "none": "",
-    "minor": "\u26a0\ufe0f",    # ⚠️
-    "major": "\U0001f534",      # 🔴
-    "critical": "\U0001f6a8",   # 🚨
+    "minor": "\u26a0\ufe0f",  # ⚠️
+    "major": "\U0001f534",  # 🔴
+    "critical": "\U0001f6a8",  # 🚨
 }
 
 STATUS_LABELS = {
@@ -50,28 +56,133 @@ def _log_api(msg: str):
         pass
 
 
-def fetch_oauth_usage() -> dict | None:
-    """Fetch rate limit usage from the Anthropic OAuth API.
+OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
-    Returns a dict compatible with the rate_limits format in status files,
-    or None if the request fails (429, auth error, etc.).
-    """
+# Claude Code stores its OAuth credentials in this keychain item, keyed by the
+# macOS username. Reading with no account returns a stale orphan item left by
+# older Claude Code versions, so we must match on the username.
+KEYCHAIN_SERVICE = "Claude Code-credentials"
+KEYCHAIN_ACCOUNT = getpass.getuser()
+
+
+def _read_keychain_creds() -> dict | None:
+    """Read Claude Code credentials from macOS Keychain."""
     try:
         result = subprocess.run(
-            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-            capture_output=True, text=True, timeout=5,
+            [
+                "security",
+                "find-generic-password",
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-a",
+                KEYCHAIN_ACCOUNT,
+                "-w",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode != 0:
             _log_api("ERROR  keychain read failed")
             return None
+        return json.loads(result.stdout)
+    except (json.JSONDecodeError, subprocess.TimeoutExpired, OSError) as e:
+        _log_api(f"ERROR  keychain: {type(e).__name__}: {e}")
+        return None
 
-        creds = json.loads(result.stdout)
-        token = creds.get("claudeAiOauth", {}).get("accessToken")
-        if not token:
-            _log_api("ERROR  no accessToken in keychain")
+
+def _write_keychain_creds(creds: dict) -> bool:
+    """Write updated credentials back to macOS Keychain."""
+    try:
+        creds_json = json.dumps(creds)
+        # `-U` updates the existing item in place; no need to delete first
+        # (deleting first risks wiping the refresh token if `add` then fails).
+        result = subprocess.run(
+            [
+                "security",
+                "add-generic-password",
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-a",
+                KEYCHAIN_ACCOUNT,
+                "-w",
+                creds_json,
+                "-U",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, OSError) as e:
+        _log_api(f"ERROR  keychain write: {type(e).__name__}: {e}")
+        return False
+
+
+def _refresh_oauth_token(creds: dict) -> str | None:
+    """Refresh the OAuth access token.
+
+    Returns the new token, "rejected" when the OAuth endpoint refuses the
+    refresh token (or there is none) — meaning the session is dead and only a
+    fresh `claude` login can fix it — or None on transient failures.
+    """
+    oauth = creds.get("claudeAiOauth", {})
+    refresh_token = oauth.get("refreshToken")
+    if not refresh_token:
+        _log_api("ERROR  no refreshToken in keychain")
+        return "rejected"
+
+    try:
+        body = json.dumps(
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": OAUTH_CLIENT_ID,
+            }
+        ).encode()
+        req = urllib.request.Request(
+            "https://console.anthropic.com/v1/oauth/token",
+            data=body,
+            headers={"Content-Type": "application/json", "User-Agent": "ClaudeCode/2.1"},
+            method="POST",
+        )
+        resp = urllib.request.urlopen(req, timeout=10)
+        data = json.loads(resp.read())
+
+        new_access = data.get("access_token")
+        new_refresh = data.get("refresh_token")
+        if not new_access:
+            _log_api("ERROR  token refresh returned no access_token")
             return None
 
-        _log_api("GET    /api/oauth/usage")
+        oauth["accessToken"] = new_access
+        if new_refresh:
+            oauth["refreshToken"] = new_refresh
+        if "expires_in" in data:
+            expires_at = datetime.now(timezone.utc).timestamp() + data["expires_in"]
+            oauth["expiresAt"] = int(expires_at * 1000)
+        creds["claudeAiOauth"] = oauth
+
+        if _write_keychain_creds(creds):
+            _log_api("OK     token refreshed")
+            return new_access
+        else:
+            _log_api("ERROR  token refreshed but keychain write failed")
+            return new_access  # still usable this session
+    except urllib.error.HTTPError as e:
+        _log_api(f"ERROR  token refresh HTTP {e.code}")
+        # 400/401/403 mean the refresh token itself was refused (rotated or
+        # revoked) — no retry can succeed, the user has to log in again.
+        return "rejected" if e.code in (400, 401, 403) else None
+    except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
+        _log_api(f"ERROR  token refresh: {type(e).__name__}: {e}")
+        return None
+
+
+def _call_usage_api(token: str) -> dict | str | None:
+    """Call the usage API with a given token. Returns data dict, "rate_limited", or None."""
+    _log_api("GET    /api/oauth/usage")
+    try:
         req = urllib.request.Request(
             "https://api.anthropic.com/api/oauth/usage",
             headers={
@@ -111,13 +222,70 @@ def fetch_oauth_usage() -> dict | None:
         }
     except urllib.error.HTTPError as e:
         _log_api(f"HTTP {e.code}  {e.reason}")
+        if e.code == 429:
+            return "rate_limited"
+        if e.code == 401:
+            return "unauthorized"  # expired access token — caller refreshes
         return None
     except urllib.error.URLError as e:
         _log_api(f"ERROR  network: {e.reason}")
         return None
-    except (json.JSONDecodeError, subprocess.TimeoutExpired, KeyError, OSError) as e:
+    except (json.JSONDecodeError, KeyError, OSError) as e:
         _log_api(f"ERROR  {type(e).__name__}: {e}")
         return None
+
+
+def fetch_oauth_usage() -> dict | str | None:
+    """Fetch rate limit usage from the Anthropic OAuth API.
+
+    Returns a dict on success, "rate_limited" on 429, "needs_login" when the
+    OAuth session is dead (no usable credentials, or the refresh token was
+    rejected — only a fresh `claude` login can recover), or None on transient
+    failures. On 401 (expired access token) the token is refreshed and the
+    call retried once. A 429 is a rate limit, not an auth failure, so it is
+    surfaced as-is for the caller to back off on — no refresh is attempted.
+    """
+    creds = _read_keychain_creds()
+    if not creds:
+        _log_api("NEEDS-LOGIN  no credentials in keychain")
+        return "needs_login"
+
+    token = creds.get("claudeAiOauth", {}).get("accessToken")
+    if not token:
+        _log_api("NEEDS-LOGIN  no accessToken in keychain")
+        return "needs_login"
+
+    result = _call_usage_api(token)
+    if result == "rate_limited":
+        # 429 is a rate limit, not an auth failure — refreshing the token does
+        # nothing but burn requests. Surface it so the caller just backs off.
+        return "rate_limited"
+    if result != "unauthorized":
+        return result
+
+    # 401: the access token expired — refresh it once and retry.
+    _log_api("REFRESH  attempting token refresh after unauthorized")
+    new_token = _refresh_oauth_token(creds)
+    if new_token == "rejected":
+        _log_api("NEEDS-LOGIN  refresh token rejected")
+        return "needs_login"
+    if not new_token:
+        return None
+
+    retried = _call_usage_api(new_token)
+    if retried == "unauthorized":
+        # A freshly-minted token was still refused — the session is dead.
+        _log_api("NEEDS-LOGIN  still 401 after refresh")
+        return "needs_login"
+    return retried
+
+
+def _login_recovered(failed_token: str | None) -> bool:
+    """Return True once the keychain holds a different access token than the
+    one that last failed — i.e. the user has logged in again."""
+    creds = _read_keychain_creds()
+    token = (creds or {}).get("claudeAiOauth", {}).get("accessToken")
+    return bool(token) and token != failed_token
 
 
 def _is_real_error(err: str) -> bool:
@@ -127,8 +295,17 @@ def _is_real_error(err: str) -> bool:
     if err_lower.startswith("[ede_diagnostic]"):
         return False
     # Include known real error patterns
-    real_patterns = ["500", "503", "overloaded", "rate_limit", "timeout",
-                     "network", "connection", "unavailable", "error:"]
+    real_patterns = [
+        "500",
+        "503",
+        "overloaded",
+        "rate_limit",
+        "timeout",
+        "network",
+        "connection",
+        "unavailable",
+        "error:",
+    ]
     return any(p in err_lower for p in real_patterns)
 
 
@@ -150,8 +327,7 @@ def fetch_claude_status() -> dict:
 
     # Fetch Anthropic status page
     try:
-        req = urllib.request.Request(STATUS_PAGE_URL,
-                                     headers={"User-Agent": "ClaudeWatch/0.1"})
+        req = urllib.request.Request(STATUS_PAGE_URL, headers={"User-Agent": "ClaudeWatch/0.1"})
         resp = urllib.request.urlopen(req, timeout=10)
         data = json.loads(resp.read())
 
@@ -160,11 +336,13 @@ def fetch_claude_status() -> dict:
         result["description"] = status.get("description", "")
 
         for incident in data.get("incidents", []):
-            result["incidents"].append({
-                "name": incident.get("name", "Unknown incident"),
-                "impact": incident.get("impact", "none"),
-                "updated_at": incident.get("updated_at", ""),
-            })
+            result["incidents"].append(
+                {
+                    "name": incident.get("name", "Unknown incident"),
+                    "impact": incident.get("impact", "none"),
+                    "updated_at": incident.get("updated_at", ""),
+                }
+            )
     except (urllib.error.URLError, json.JSONDecodeError, OSError):
         pass
 
@@ -211,6 +389,17 @@ def format_countdown(seconds: float) -> str:
     return f"{minutes}m"
 
 
+def format_pct(value: object) -> str:
+    """Round a percentage to a whole number for display.
+
+    Passes non-numeric sentinels (e.g. "?") through unchanged so callers can
+    use a placeholder when no data is available.
+    """
+    if isinstance(value, (int, float)):
+        return str(round(value))
+    return str(value)
+
+
 def format_time_ago(seconds: float) -> str:
     """Format seconds into a 'time ago' string."""
     if seconds < 60:
@@ -225,37 +414,39 @@ def format_time_ago(seconds: float) -> str:
     return f"{hours // 24}d ago"
 
 
-def status_icon(used_pct: int, resets_at: float = 0, now: float = 0) -> str:
+def status_icon(
+    used_pct: int, resets_at: float = 0, now: float = 0, window_hours: float = 5
+) -> str:
     """Return a colored circle based on smart burn-rate projection.
 
     If we have timing data, projects whether the current burn rate will
     exhaust the quota before the window resets. Falls back to fixed
     thresholds if timing data is unavailable.
     """
-    # Always green under 30%
-    if used_pct < 30:
-        return "\U0001f7e2"
-
     if resets_at and now:
-        window_duration = 5 * 3600
+        window_duration = window_hours * 3600
         window_start = resets_at - window_duration
         time_elapsed = now - window_start
         time_remaining = resets_at - now
 
         if time_elapsed > 60 and time_remaining > 0:
-            burn_rate = used_pct / time_elapsed          # % per second
+            burn_rate = used_pct / time_elapsed  # % per second
             projected = used_pct + burn_rate * time_remaining
 
             if projected < 80:
-                return "\U0001f7e2"   # green — on track
+                return "\U0001f7e2"  # green — on track
             elif projected < 100:
-                return "\U0001f7e1"   # yellow — might get close
+                return "\U0001f7e1"  # yellow — might get close
             elif projected < 130:
-                return "\U0001f7e0"   # orange — likely to hit limit
+                return "\U0001f7e0"  # orange — likely to hit limit
             else:
-                return "\U0001f534"   # red — well over
+                return "\U0001f534"  # red — well over
 
-    # Fallback: no timing data
+    # Fallback: no timing data — apply the <30% shortcut only here, since
+    # for long windows (e.g. 7d) the projection above may classify low
+    # percentages as red when the early-week burn rate is still high.
+    if used_pct < 30:
+        return "\U0001f7e2"
     if used_pct < 60:
         return "\U0001f7e1"
     elif used_pct < 85:
@@ -496,15 +687,29 @@ class ClaudeWatchApp(rumps.App):
         self._session_keys: list[str] = []
         self._api_rate_limits: dict | None = self._load_api_cache()
         self._last_api_poll = 0.0  # always fetch fresh data on startup
+        self._last_api_success = 0.0
+        self._api_backoff = 0  # exponential backoff exponent for 429s
+        self._needs_login = False  # OAuth session dead; user must run `claude` and log in
+        self._needs_login_token: str | None = None  # access token that failed, if any
+        self._last_keychain_check = 0.0
         self._last_status_poll = 0.0
-        self._claude_status: dict = {"indicator": "none", "description": "", "incidents": [], "errors": []}
+        self._claude_status: dict = {
+            "indicator": "none",
+            "description": "",
+            "incidents": [],
+            "errors": [],
+        }
 
-        self.rate_5h = rumps.MenuItem("5-hour: --", callback=None)
-        self.rate_7d = rumps.MenuItem("7-day: --", callback=None)
+        self.rate_5h = rumps.MenuItem(
+            "5-hour: --", callback=lambda _: webbrowser.open("https://claude.ai/settings/usage")
+        )
+        self.rate_7d = rumps.MenuItem(
+            "7-day: --", callback=lambda _: webbrowser.open("https://claude.ai/settings/usage")
+        )
         self.last_updated = rumps.MenuItem("Last updated: --", callback=None)
         self.status_item = rumps.MenuItem(
             "✅ All Systems Operational",
-            callback=lambda _: webbrowser.open("https://status.anthropic.com")
+            callback=lambda _: webbrowser.open("https://status.claude.com"),
         )
         self.sessions_header = rumps.MenuItem("Active Sessions", callback=None)
         self._sessions_header_key = "Active Sessions"
@@ -521,7 +726,7 @@ class ClaudeWatchApp(rumps.App):
             None,
             self.recent_header,
             None,
-            rumps.MenuItem("Refresh Now", callback=self.refresh),
+            rumps.MenuItem("🔄 Refresh Now", callback=self.refresh),
             rumps.MenuItem("Quit", callback=rumps.quit_application),
         ]
 
@@ -540,10 +745,8 @@ class ClaudeWatchApp(rumps.App):
 
     def _save_api_poll_time(self, ts: float):
         """Persist the last API poll timestamp to disk."""
-        try:
+        with contextlib.suppress(OSError):
             self._API_POLL_CACHE.write_text(str(ts))
-        except OSError:
-            pass
 
     def _load_api_cache(self) -> dict | None:
         """Load cached API rate limit data from disk."""
@@ -554,10 +757,8 @@ class ClaudeWatchApp(rumps.App):
 
     def _save_api_cache(self, data: dict):
         """Persist API rate limit data to disk."""
-        try:
+        with contextlib.suppress(OSError):
             self._API_DATA_CACHE.write_text(json.dumps(data))
-        except OSError:
-            pass
 
     def refresh(self, sender=None):
         """Poll status files and update the menubar."""
@@ -588,8 +789,10 @@ class ClaudeWatchApp(rumps.App):
 
         # Most recent status file for account-wide rate limits
         recent_statuses = [s for s in all_statuses if s["_mtime"] >= window_start]
-        latest = max(recent_statuses, key=lambda s: s["_mtime"]) if recent_statuses else (
-            max(all_statuses, key=lambda s: s["_mtime"]) if all_statuses else None
+        latest = (
+            max(recent_statuses, key=lambda s: s["_mtime"])
+            if recent_statuses
+            else (max(all_statuses, key=lambda s: s["_mtime"]) if all_statuses else None)
         )
 
         # Merge in cached API data if more recent than status files
@@ -601,21 +804,57 @@ class ClaudeWatchApp(rumps.App):
         # Poll OAuth API if:
         # - user manually clicked Refresh Now
         # - startup (last_api_poll == 0, always get fresh data regardless of cache age)
-        # - data is stale AND interval has passed
+        # - data is stale AND interval has passed (with backoff on 429)
         force = sender is not None and not isinstance(sender, rumps.Timer)
         is_startup = self._last_api_poll == 0.0
         latest_age = now - latest["_mtime"] if latest else float("inf")
-        if (force or is_startup or (latest_age > API_STALE_THRESHOLD
-                                    and now - self._last_api_poll > API_POLL_INTERVAL)):
+        poll_interval = API_POLL_INTERVAL * (2**self._api_backoff)
+        should_poll = (
+            force
+            or is_startup
+            or (latest_age > API_STALE_THRESHOLD and now - self._last_api_poll > poll_interval)
+        )
+        if self._needs_login and not force:
+            # Dead session: API polls can't succeed until the user logs in
+            # again, so watch the keychain (a free local read) instead and
+            # only hit the API once a new login shows up.
+            should_poll = False
+            if now - self._last_keychain_check >= KEYCHAIN_WATCH_INTERVAL:
+                self._last_keychain_check = now
+                if _login_recovered(self._needs_login_token):
+                    _log_api("RECOVER  new login detected in keychain")
+                    should_poll = True
+        if should_poll:
             api_data = fetch_oauth_usage()
-            if api_data:
+            self._last_api_poll = now
+            if isinstance(api_data, dict):
                 api_data["_mtime"] = now
                 api_data["_session_id"] = "_api"
                 self._api_rate_limits = api_data
-                self._last_api_poll = now
+                self._api_backoff = 0
+                self._needs_login = False
+                self._needs_login_token = None
+                self._last_api_success = now
                 self._save_api_poll_time(now)
                 self._save_api_cache(api_data)
                 latest = api_data
+            elif api_data == "needs_login":
+                # Record the token that failed so the keychain watch can spot
+                # a fresh login. Backoff stays put — retries are pointless.
+                self._needs_login = True
+                creds = _read_keychain_creds() or {}
+                self._needs_login_token = creds.get("claudeAiOauth", {}).get("accessToken")
+                _log_api("NEEDS-LOGIN  watching keychain for a new login")
+            elif api_data == "rate_limited":
+                self._api_backoff = min(self._api_backoff + 1, 6)  # max ~64 min
+                next_interval = API_POLL_INTERVAL * (2**self._api_backoff)
+                _log_api(f"BACKOFF  next poll in {next_interval:.0f}s")
+            elif api_data is None:
+                # Treat non-429 failures (network / 5xx / parse) the same as
+                # 429 so the cache ages out and the UI shows the stale icon.
+                self._api_backoff = min(self._api_backoff + 1, 6)
+                next_interval = API_POLL_INTERVAL * (2**self._api_backoff)
+                _log_api(f"BACKOFF  next poll in {next_interval:.0f}s (non-429)")
 
         # Per-session statuses: only for alive sessions within the window
         sessions = get_active_sessions()
@@ -641,10 +880,12 @@ class ClaudeWatchApp(rumps.App):
     def _update_rate_limits(self, latest: dict | None, latest_activity: float, now: float):
         """Update menubar title and rate limit menu items."""
         if not latest:
-            self.title = "\u2022 --"
-            self.rate_5h.title = "5-hour: no data"
-            self.rate_7d.title = "7-day: no data"
+            self.title = LOGIN_TITLE if self._needs_login else "\u2022 --"
+            self.rate_5h.title = "⚪ 5-hour: no data"
+            self.rate_7d.title = "⚪ 7-day: no data"
             self.last_updated.title = "No status data yet"
+            if self._needs_login:
+                self.status_item.title = LOGIN_STATUS_LINE
             return
 
         rl = latest.get("rate_limits", {})
@@ -657,10 +898,15 @@ class ClaudeWatchApp(rumps.App):
 
         used_7d = seven_day.get("used_percentage", 0)
         resets_at_7d = seven_day.get("resets_at", 0)
-        countdown_7d = max(0, resets_at_7d - now)
 
-        # Menubar title
-        icon = status_icon(used_5h, resets_at_5h, now)
+        # Detect stale data (API in backoff / error state, or login expired)
+        data_age = now - latest.get("_mtime", 0)
+        is_stale = self._needs_login or (
+            self._api_backoff > 0 and data_age > API_STALE_THRESHOLD
+        )
+
+        # Menubar title \u2014 show \u26aa when data is stale
+        icon = "\u26aa" if is_stale else status_icon(used_5h, resets_at_5h, now)
 
         # Append status icon to title if Claude is having issues or session errors
         cs = self._claude_status
@@ -669,22 +915,59 @@ class ClaudeWatchApp(rumps.App):
         has_errors = bool(cs.get("errors"))
         alert = s_icon or ("\u26a0\ufe0f" if has_errors else "")
         suffix = f"  {alert}" if alert else ""
-        self.title = f"{icon}{used_5h}% \u21bb{format_countdown(countdown_5h)}{suffix}"
+        usage_title = f"{icon}{format_pct(used_5h)}% \u21bb{format_countdown(countdown_5h)}{suffix}"
+        self.title = f"{LOGIN_TITLE}{suffix}" if self._needs_login else usage_title
 
         # Dropdown items
-        reset_time_5h = datetime.fromtimestamp(resets_at_5h).strftime("%-I:%M %p") if resets_at_5h else "?"
-        reset_time_7d = datetime.fromtimestamp(resets_at_7d).strftime("%a %-I:%M %p") if resets_at_7d else "?"
+        reset_time_5h = (
+            datetime.fromtimestamp(resets_at_5h).strftime("%-I:%M %p") if resets_at_5h else "?"
+        )
+        reset_time_7d = (
+            datetime.fromtimestamp(resets_at_7d).strftime("%a %-I:%M %p") if resets_at_7d else "?"
+        )
 
-        self.rate_5h.title = f"5-hour:  {used_5h}% used  (resets {reset_time_5h})"
-        self.rate_7d.title = f"7-day:   {used_7d}% used  (resets {reset_time_7d})"
+        icon_5h = "\u26aa" if is_stale else status_icon(used_5h, resets_at_5h, now)
+        icon_7d = (
+            "\u26aa" if is_stale else status_icon(used_7d, resets_at_7d, now, window_hours=7 * 24)
+        )
+        self.rate_5h.title = (
+            f"{icon_5h} 5-hour:  {format_pct(used_5h)}% used  (resets {reset_time_5h})"
+        )
+        self.rate_7d.title = (
+            f"{icon_7d} 7-day:   {format_pct(used_7d)}% used  (resets {reset_time_7d})"
+        )
+
+        # Tooltip: show last successful fetch time
+        if self._needs_login:
+            if self._last_api_success:
+                ago = format_time_ago(now - self._last_api_success)
+                tooltip = f"Login expired \u2014 last updated {ago}"
+            else:
+                tooltip = "Login expired \u2014 run claude and log in again"
+        elif self._last_api_success:
+            ago = format_time_ago(now - self._last_api_success)
+            tooltip = f"Stale \u2014 last updated {ago}" if is_stale else f"Last updated {ago}"
+        else:
+            tooltip = "No successful API fetch yet"
+        # `_menuitem` is private rumps state; guard in case it's renamed or
+        # not yet attached, matching the nsstatusitem guard below.
+        with contextlib.suppress(AttributeError):
+            self.rate_5h._menuitem.setToolTip_(tooltip)
+            self.rate_7d._menuitem.setToolTip_(tooltip)
+
+        # Status bar tooltip (hover the menubar item itself)
+        with contextlib.suppress(AttributeError):
+            self._nsapp.nsstatusitem.button().setToolTip_(tooltip)
 
         # Status item
         incidents = cs.get("incidents", [])
         errors = cs.get("errors", [])
-        if s_indicator == "none" and not errors:
+        if self._needs_login:
+            self.status_item.title = LOGIN_STATUS_LINE
+        elif s_indicator == "none" and not errors:
             self.status_item.title = "\u2705 All Systems Operational"
         elif errors and s_indicator == "none":
-            self.status_item.title = f"\u26a0\ufe0f Session error detected"
+            self.status_item.title = "\u26a0\ufe0f Session error detected"
         elif incidents:
             self.status_item.title = f"{s_icon} {incidents[0]['name']}"
         else:
@@ -694,9 +977,14 @@ class ClaudeWatchApp(rumps.App):
         age = now - latest_activity if latest_activity > 0 else now - latest["_mtime"]
         self.last_updated.title = f"Last active: {format_time_ago(age)}"
 
-    def _update_sessions(self, sessions: list[dict], statuses: list[dict],
-                         transcript_info: dict[str, dict],
-                         t3_threads: dict[str, list[dict]], now: float):
+    def _update_sessions(
+        self,
+        sessions: list[dict],
+        statuses: list[dict],
+        transcript_info: dict[str, dict],
+        t3_threads: dict[str, list[dict]],
+        now: float,
+    ):
         """Update the sessions list in the dropdown.
 
         - "Active": has a status file OR transcript modified in current 5h window
@@ -707,10 +995,8 @@ class ClaudeWatchApp(rumps.App):
 
         # Remove old dynamic session items
         for key in list(self._session_keys):
-            try:
+            with contextlib.suppress(KeyError):
                 del self.menu[key]
-            except KeyError:
-                pass
         self._session_keys.clear()
 
         # Split sessions into active and recent
@@ -744,8 +1030,10 @@ class ClaudeWatchApp(rumps.App):
             t = transcript_info.get(sid)
             st = status_by_id.get(sid)
             times = []
-            if t: times.append(t.get("_transcript_mtime", 0))
-            if st: times.append(st.get("_mtime", 0))
+            if t:
+                times.append(t.get("_transcript_mtime", 0))
+            if st:
+                times.append(st.get("_mtime", 0))
             return max(times) if times else s.get("startedAt", 0) / 1000
 
         def thread_label_for(session: dict) -> str:
@@ -761,7 +1049,7 @@ class ClaudeWatchApp(rumps.App):
                 ctx_pct = status.get("context_window", {}).get("used_percentage", "?")
                 total_cost = status.get("cost", {}).get("total_cost_usd", 0)
                 cost_str = f"  ${total_cost:.2f}" if total_cost else ""
-                return f"ctx:{ctx_pct}%{cost_str}"
+                return f"ctx:{format_pct(ctx_pct)}%{cost_str}"
             elif transcript:
                 out_tokens = transcript.get("output_tokens", 0)
                 return f"{format_tokens(out_tokens)}\u2193"
@@ -783,7 +1071,7 @@ class ClaudeWatchApp(rumps.App):
                 ctx_pct = status.get("context_window", {}).get("used_percentage", "?")
                 age = now - status["_mtime"]
                 item = rumps.MenuItem(item_label)
-                details = [f"Model: {model}", f"Context: {ctx_pct}% used"]
+                details = [f"Model: {model}", f"Context: {format_pct(ctx_pct)}% used"]
                 ctx = status.get("context_window", {})
                 if ctx.get("context_window_size"):
                     details.append(f"Window: {ctx['context_window_size'] // 1000}K tokens")
@@ -829,13 +1117,15 @@ class ClaudeWatchApp(rumps.App):
             reverse=True,
         )
 
-        self.sessions_header.title = f"Active Sessions ({len(sorted_groups)})"
-
-        for name, group_sessions in sorted_groups:
+        def build_project_submenu(
+            name: str, group_sessions: list[dict], show_ep_icon: bool = True
+        ) -> tuple[str, rumps.MenuItem]:
+            """Build a project-level submenu item with thread children."""
             most_recent = max(group_sessions, key=session_last_active)
-            ep_icon = ep_icons.get(most_recent.get("entrypoint", "?"), "\u2022")
-            label = f"{ep_icon} {name}"  # count added after filtering below
-            submenu = rumps.MenuItem(label)
+            ep_icon = (
+                ep_icons.get(most_recent.get("entrypoint", "?"), "\u2022") if show_ep_icon else ""
+            )
+            prefix = f"{ep_icon} " if ep_icon else ""
 
             sorted_sessions = sorted(group_sessions, key=session_last_active, reverse=True)
 
@@ -846,8 +1136,8 @@ class ClaudeWatchApp(rumps.App):
                 sorted_sessions = with_threads
 
             n = len(sorted_sessions)
-            if n > 1:
-                label = f"{ep_icon} {name}  ({n} threads)"
+            label = f"{prefix}{name}  ({n} threads)" if n > 1 else f"{prefix}{name}"
+            submenu = rumps.MenuItem(label)
 
             # Detect duplicate thread labels within the group — append age to distinguish
             thread_labels = [thread_label_for(s) for s in sorted_sessions]
@@ -867,6 +1157,34 @@ class ClaudeWatchApp(rumps.App):
                 if child:
                     submenu.add(child)
 
+            return label, submenu
+
+        # Separate T3 Code (sdk-ts) groups from direct (CLI/VS Code) groups
+        t3_groups = []
+        direct_groups = []
+        for name, group_sessions in sorted_groups:
+            most_recent = max(group_sessions, key=session_last_active)
+            if most_recent.get("entrypoint") == "sdk-ts":
+                t3_groups.append((name, group_sessions))
+            else:
+                direct_groups.append((name, group_sessions))
+
+        display_count = len(direct_groups) + (1 if t3_groups else 0)
+        self.sessions_header.title = f"Active Sessions ({display_count})"
+
+        # Insert T3 Code parent first (ends up after direct groups in the menu)
+        if t3_groups:
+            t3_label = f"\u2699\ufe0f T3 Code  ({len(t3_groups)})"
+            t3_parent = rumps.MenuItem(t3_label)
+            for name, group_sessions in t3_groups:
+                _, project_submenu = build_project_submenu(name, group_sessions, show_ep_icon=False)
+                t3_parent.add(project_submenu)
+            self._session_keys.append(t3_label)
+            self.menu.insert_after(self._sessions_header_key, t3_parent)
+
+        # Add non-T3 groups directly to the menu
+        for name, group_sessions in direct_groups:
+            label, submenu = build_project_submenu(name, group_sessions)
             self._session_keys.append(label)
             self.menu.insert_after(self._sessions_header_key, submenu)
 
@@ -876,7 +1194,9 @@ class ClaudeWatchApp(rumps.App):
             name = session.get("name") or short_project_name(session.get("cwd", "?"))
             recent_groups.setdefault(name, []).append(session)
 
-        self.recent_header.title = f"Recent Sessions ({len(recent_groups)})" if recent_groups else "Recent Sessions"
+        self.recent_header.title = (
+            f"Recent Sessions ({len(recent_groups)})" if recent_groups else "Recent Sessions"
+        )
 
         for name, group_sessions in sorted(
             recent_groups.items(),

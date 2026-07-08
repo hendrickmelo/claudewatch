@@ -11,13 +11,13 @@ A macOS menubar app that shows your Claude Code rate limit usage and active sess
 **Menubar** (always visible):
 - Rate limit usage with smart burn-rate color indicator
 - Countdown to 5-hour window reset
-- Claude system status alerts (from status.anthropic.com)
+- Claude system status alerts (from status.claude.com)
 
 **Dropdown** (click to expand):
 - 5-hour and 7-day rate limit details
 - Active sessions grouped by project with T3 thread titles
 - Per-session details (model, context, cost, tokens)
-- Live Claude system status (clickable → status.anthropic.com)
+- Live Claude system status (clickable → status.claude.com)
 
 ## Supported clients
 
@@ -88,7 +88,7 @@ ClaudeWatch pulls data from multiple sources:
 2. **Statusline hook** — writes per-session status files on each Claude Code interaction (context %, cost, lines changed)
 3. **Transcript files** — reads `~/.claude/projects/` JSONL files for session activity and token counts
 4. **T3 SQLite database** — reads `~/.t3/userdata/state.sqlite` for thread titles and session mapping
-5. **Status page** — polls status.anthropic.com for incident alerts
+5. **Status page** — polls status.claude.com for incident alerts
 
 Rate limits are account-wide, so data from any session reflects your total usage across all Claude Code clients.
 

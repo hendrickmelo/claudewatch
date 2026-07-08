@@ -17,10 +17,15 @@ from claudewatch.app import (
 
 # ── Helper ────────────────────────────────────────────────────────────────────
 
+_failures = 0
+
+
 def check(label: str, got, expected):
+    global _failures
     ok = "✅" if got == expected else "❌"
     print(f"  {ok} {label}")
     if got != expected:
+        _failures += 1
         print(f"       got:      {got!r}")
         print(f"       expected: {expected!r}")
 
@@ -106,4 +111,136 @@ if result["errors"]:
     for e in result["errors"]:
         print(f"    - {e}")
 
+# ── 6. OAuth refresh-on-401 regression (fetch_oauth_usage) ───────────────────
+# Guards the bug where a 401 (expired access token) never triggered a token
+# refresh — only 429 did — so the menubar showed stale 0% / "resets ?" forever.
+
+print("\n── OAuth refresh on 401 (fetch_oauth_usage) ──")
+import claudewatch.app as app
+
+GOOD = {
+    "rate_limits": {"five_hour": {"used_percentage": 12, "resets_at": 0}},
+    "_source": "oauth_api",
+}
+
+
+DEFAULT_CREDS = {"claudeAiOauth": {"accessToken": "stale"}}
+
+
+def run_fetch(call_results, refresh_token, creds=DEFAULT_CREDS):
+    """Drive fetch_oauth_usage with a scripted sequence of _call_usage_api
+    return values and a _refresh_oauth_token result. Returns (result, calls),
+    where calls is the list of tokens passed to _call_usage_api."""
+    seq = list(call_results)
+    calls = []
+
+    def fake_call(token):
+        calls.append(token)
+        return seq.pop(0)
+
+    orig = (app._read_keychain_creds, app._call_usage_api, app._refresh_oauth_token)
+    app._read_keychain_creds = lambda: creds
+    app._call_usage_api = fake_call
+    app._refresh_oauth_token = lambda creds: refresh_token
+    try:
+        return app.fetch_oauth_usage(), calls
+    finally:
+        (app._read_keychain_creds, app._call_usage_api, app._refresh_oauth_token) = orig
+
+
+# 401 → refresh succeeds → retry with new token → returns usage dict
+res, calls = run_fetch(["unauthorized", GOOD], "fresh-token")
+check("401 triggers refresh + retry", res, GOOD)
+check("401 retry uses refreshed token", calls, ["stale", "fresh-token"])
+
+# 401 → refresh fails transiently (network) → None (caller backs off, stale icon)
+res, _ = run_fetch(["unauthorized"], None)
+check("401 with failed refresh → None", res, None)
+
+# 401 persists after refresh → the session is dead, surface needs_login
+res, _ = run_fetch(["unauthorized", "unauthorized"], "fresh-token")
+check("persistent 401 → needs_login", res, "needs_login")
+
+# 429 is a rate limit, not an auth failure → surface it, do NOT refresh/retry
+res, calls = run_fetch(["rate_limited", GOOD], "fresh-token")
+check("429 surfaced as rate_limited", res, "rate_limited")
+check("429 does not refresh or retry", calls, ["stale"])
+
+# Healthy first call → returns immediately, no refresh
+res, calls = run_fetch([GOOD], None)
+check("200 returns without refresh", (res, calls), (GOOD, ["stale"]))
+
+# ── 7. Needs-login detection ──────────────────────────────────────────────────
+# When the OAuth session is dead (creds cleared or refresh token rejected) the
+# app must surface "needs_login" instead of a generic failure, so the menubar
+# can tell the user to run `claude` and log in again.
+
+print("\n── Needs-login detection (fetch_oauth_usage) ──")
+
+# Keychain item gone (user logged out / creds cleared) → needs_login
+res, calls = run_fetch([], None, creds=None)
+check("missing keychain item → needs_login", (res, calls), ("needs_login", []))
+
+# Keychain item present but no accessToken → needs_login
+res, calls = run_fetch([], None, creds={"claudeAiOauth": {}})
+check("missing accessToken → needs_login", (res, calls), ("needs_login", []))
+
+# 401 and the refresh token is rejected outright → needs_login
+res, _ = run_fetch(["unauthorized"], "rejected")
+check("401 + rejected refresh → needs_login", res, "needs_login")
+
+print("\n── Refresh rejection vs transient failure (_refresh_oauth_token) ──")
+import io
+import urllib.error
+import urllib.request
+
+
+def run_refresh(creds, error=None):
+    """Drive _refresh_oauth_token with urlopen raising `error` (or succeeding)."""
+
+    def fake_urlopen(req, timeout=0):
+        if error:
+            raise error
+        return io.BytesIO(b'{"access_token": "new-token"}')
+
+    orig_urlopen = urllib.request.urlopen
+    orig_write = app._write_keychain_creds
+    urllib.request.urlopen = fake_urlopen
+    app._write_keychain_creds = lambda creds: True
+    try:
+        return app._refresh_oauth_token(creds)
+    finally:
+        urllib.request.urlopen = orig_urlopen
+        app._write_keychain_creds = orig_write
+
+
+RT_CREDS = {"claudeAiOauth": {"refreshToken": "rt"}}
+http_400 = urllib.error.HTTPError("url", 400, "Bad Request", None, None)
+http_503 = urllib.error.HTTPError("url", 503, "Service Unavailable", None, None)
+network = urllib.error.URLError("connection refused")
+
+check("HTTP 400 → rejected", run_refresh(RT_CREDS, http_400), "rejected")
+check("no refreshToken → rejected", run_refresh({"claudeAiOauth": {}}), "rejected")
+check("HTTP 503 → None (transient)", run_refresh(RT_CREDS, http_503), None)
+check("network error → None (transient)", run_refresh(RT_CREDS, network), None)
+check("success → new token", run_refresh(RT_CREDS), "new-token")
+
+print("\n── Login recovery detection (_login_recovered) ──")
+
+
+def run_recovered(creds, failed_token):
+    orig = app._read_keychain_creds
+    app._read_keychain_creds = lambda: creds
+    try:
+        return app._login_recovered(failed_token)
+    finally:
+        app._read_keychain_creds = orig
+
+
+check("no creds yet → not recovered", run_recovered(None, "bad"), False)
+check("same bad token → not recovered", run_recovered(DEFAULT_CREDS, "stale"), False)
+check("new token → recovered", run_recovered(DEFAULT_CREDS, "bad"), True)
+check("token appears after none → recovered", run_recovered(DEFAULT_CREDS, None), True)
+
 print()
+sys.exit(1 if _failures else 0)
