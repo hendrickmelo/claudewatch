@@ -65,8 +65,15 @@ def _read_keychain_creds() -> dict | None:
     """Read Claude Code credentials from macOS Keychain."""
     try:
         result = subprocess.run(
-            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE,
-             "-a", KEYCHAIN_ACCOUNT, "-w"],
+            [
+                "security",
+                "find-generic-password",
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-a",
+                KEYCHAIN_ACCOUNT,
+                "-w",
+            ],
             capture_output=True,
             text=True,
             timeout=5,
@@ -117,11 +124,13 @@ def _refresh_oauth_token(creds: dict) -> str | None:
         return None
 
     try:
-        body = json.dumps({
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": OAUTH_CLIENT_ID,
-        }).encode()
+        body = json.dumps(
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": OAUTH_CLIENT_ID,
+            }
+        ).encode()
         req = urllib.request.Request(
             "https://console.anthropic.com/v1/oauth/token",
             data=body,
@@ -351,6 +360,17 @@ def format_countdown(seconds: float) -> str:
     if hours > 0:
         return f"{hours}h{minutes:02d}m"
     return f"{minutes}m"
+
+
+def format_pct(value: object) -> str:
+    """Round a percentage to a whole number for display.
+
+    Passes non-numeric sentinels (e.g. "?") through unchanged so callers can
+    use a placeholder when no data is available.
+    """
+    if isinstance(value, (int, float)):
+        return str(round(value))
+    return str(value)
 
 
 def format_time_ago(seconds: float) -> str:
@@ -841,7 +861,7 @@ class ClaudeWatchApp(rumps.App):
         has_errors = bool(cs.get("errors"))
         alert = s_icon or ("\u26a0\ufe0f" if has_errors else "")
         suffix = f"  {alert}" if alert else ""
-        self.title = f"{icon}{used_5h}% \u21bb{format_countdown(countdown_5h)}{suffix}"
+        self.title = f"{icon}{format_pct(used_5h)}% \u21bb{format_countdown(countdown_5h)}{suffix}"
 
         # Dropdown items
         reset_time_5h = (
@@ -855,8 +875,12 @@ class ClaudeWatchApp(rumps.App):
         icon_7d = (
             "\u26aa" if is_stale else status_icon(used_7d, resets_at_7d, now, window_hours=7 * 24)
         )
-        self.rate_5h.title = f"{icon_5h} 5-hour:  {used_5h}% used  (resets {reset_time_5h})"
-        self.rate_7d.title = f"{icon_7d} 7-day:   {used_7d}% used  (resets {reset_time_7d})"
+        self.rate_5h.title = (
+            f"{icon_5h} 5-hour:  {format_pct(used_5h)}% used  (resets {reset_time_5h})"
+        )
+        self.rate_7d.title = (
+            f"{icon_7d} 7-day:   {format_pct(used_7d)}% used  (resets {reset_time_7d})"
+        )
 
         # Tooltip: show last successful fetch time
         if self._last_api_success:
@@ -962,7 +986,7 @@ class ClaudeWatchApp(rumps.App):
                 ctx_pct = status.get("context_window", {}).get("used_percentage", "?")
                 total_cost = status.get("cost", {}).get("total_cost_usd", 0)
                 cost_str = f"  ${total_cost:.2f}" if total_cost else ""
-                return f"ctx:{ctx_pct}%{cost_str}"
+                return f"ctx:{format_pct(ctx_pct)}%{cost_str}"
             elif transcript:
                 out_tokens = transcript.get("output_tokens", 0)
                 return f"{format_tokens(out_tokens)}\u2193"
@@ -984,7 +1008,7 @@ class ClaudeWatchApp(rumps.App):
                 ctx_pct = status.get("context_window", {}).get("used_percentage", "?")
                 age = now - status["_mtime"]
                 item = rumps.MenuItem(item_label)
-                details = [f"Model: {model}", f"Context: {ctx_pct}% used"]
+                details = [f"Model: {model}", f"Context: {format_pct(ctx_pct)}% used"]
                 ctx = status.get("context_window", {})
                 if ctx.get("context_window_size"):
                     details.append(f"Window: {ctx['context_window_size'] // 1000}K tokens")
