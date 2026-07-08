@@ -22,6 +22,10 @@ PROJECTS_DIR = CLAUDE_DIR / "projects"
 POLL_INTERVAL = 5  # seconds
 API_POLL_INTERVAL = 60  # seconds
 API_STALE_THRESHOLD = 300  # only poll API if no status update in 5 minutes
+KEYCHAIN_WATCH_INTERVAL = 30  # needs-login: how often to check keychain for a new login
+
+LOGIN_TITLE = "🔑 login"
+LOGIN_STATUS_LINE = "🔑 Claude login expired — run claude and log in again"
 API_LOG = Path.home() / ".claude" / "claudewatch-api.log"
 
 STATUS_PAGE_URL = "https://status.claude.com/api/v2/summary.json"
@@ -685,6 +689,9 @@ class ClaudeWatchApp(rumps.App):
         self._last_api_poll = 0.0  # always fetch fresh data on startup
         self._last_api_success = 0.0
         self._api_backoff = 0  # exponential backoff exponent for 429s
+        self._needs_login = False  # OAuth session dead; user must run `claude` and log in
+        self._needs_login_token: str | None = None  # access token that failed, if any
+        self._last_keychain_check = 0.0
         self._last_status_poll = 0.0
         self._claude_status: dict = {
             "indicator": "none",
@@ -802,11 +809,22 @@ class ClaudeWatchApp(rumps.App):
         is_startup = self._last_api_poll == 0.0
         latest_age = now - latest["_mtime"] if latest else float("inf")
         poll_interval = API_POLL_INTERVAL * (2**self._api_backoff)
-        if (
+        should_poll = (
             force
             or is_startup
             or (latest_age > API_STALE_THRESHOLD and now - self._last_api_poll > poll_interval)
-        ):
+        )
+        if self._needs_login and not force:
+            # Dead session: API polls can't succeed until the user logs in
+            # again, so watch the keychain (a free local read) instead and
+            # only hit the API once a new login shows up.
+            should_poll = False
+            if now - self._last_keychain_check >= KEYCHAIN_WATCH_INTERVAL:
+                self._last_keychain_check = now
+                if _login_recovered(self._needs_login_token):
+                    _log_api("RECOVER  new login detected in keychain")
+                    should_poll = True
+        if should_poll:
             api_data = fetch_oauth_usage()
             self._last_api_poll = now
             if isinstance(api_data, dict):
@@ -814,10 +832,19 @@ class ClaudeWatchApp(rumps.App):
                 api_data["_session_id"] = "_api"
                 self._api_rate_limits = api_data
                 self._api_backoff = 0
+                self._needs_login = False
+                self._needs_login_token = None
                 self._last_api_success = now
                 self._save_api_poll_time(now)
                 self._save_api_cache(api_data)
                 latest = api_data
+            elif api_data == "needs_login":
+                # Record the token that failed so the keychain watch can spot
+                # a fresh login. Backoff stays put — retries are pointless.
+                self._needs_login = True
+                creds = _read_keychain_creds() or {}
+                self._needs_login_token = creds.get("claudeAiOauth", {}).get("accessToken")
+                _log_api("NEEDS-LOGIN  watching keychain for a new login")
             elif api_data == "rate_limited":
                 self._api_backoff = min(self._api_backoff + 1, 6)  # max ~64 min
                 next_interval = API_POLL_INTERVAL * (2**self._api_backoff)
@@ -853,10 +880,12 @@ class ClaudeWatchApp(rumps.App):
     def _update_rate_limits(self, latest: dict | None, latest_activity: float, now: float):
         """Update menubar title and rate limit menu items."""
         if not latest:
-            self.title = "\u2022 --"
+            self.title = LOGIN_TITLE if self._needs_login else "\u2022 --"
             self.rate_5h.title = "⚪ 5-hour: no data"
             self.rate_7d.title = "⚪ 7-day: no data"
             self.last_updated.title = "No status data yet"
+            if self._needs_login:
+                self.status_item.title = LOGIN_STATUS_LINE
             return
 
         rl = latest.get("rate_limits", {})
@@ -870,9 +899,11 @@ class ClaudeWatchApp(rumps.App):
         used_7d = seven_day.get("used_percentage", 0)
         resets_at_7d = seven_day.get("resets_at", 0)
 
-        # Detect stale data (API in backoff / error state)
+        # Detect stale data (API in backoff / error state, or login expired)
         data_age = now - latest.get("_mtime", 0)
-        is_stale = self._api_backoff > 0 and data_age > API_STALE_THRESHOLD
+        is_stale = self._needs_login or (
+            self._api_backoff > 0 and data_age > API_STALE_THRESHOLD
+        )
 
         # Menubar title \u2014 show \u26aa when data is stale
         icon = "\u26aa" if is_stale else status_icon(used_5h, resets_at_5h, now)
@@ -884,7 +915,8 @@ class ClaudeWatchApp(rumps.App):
         has_errors = bool(cs.get("errors"))
         alert = s_icon or ("\u26a0\ufe0f" if has_errors else "")
         suffix = f"  {alert}" if alert else ""
-        self.title = f"{icon}{format_pct(used_5h)}% \u21bb{format_countdown(countdown_5h)}{suffix}"
+        usage_title = f"{icon}{format_pct(used_5h)}% \u21bb{format_countdown(countdown_5h)}{suffix}"
+        self.title = f"{LOGIN_TITLE}{suffix}" if self._needs_login else usage_title
 
         # Dropdown items
         reset_time_5h = (
@@ -906,7 +938,13 @@ class ClaudeWatchApp(rumps.App):
         )
 
         # Tooltip: show last successful fetch time
-        if self._last_api_success:
+        if self._needs_login:
+            if self._last_api_success:
+                ago = format_time_ago(now - self._last_api_success)
+                tooltip = f"Login expired \u2014 last updated {ago}"
+            else:
+                tooltip = "Login expired \u2014 run claude and log in again"
+        elif self._last_api_success:
             ago = format_time_ago(now - self._last_api_success)
             tooltip = f"Stale \u2014 last updated {ago}" if is_stale else f"Last updated {ago}"
         else:
@@ -924,7 +962,9 @@ class ClaudeWatchApp(rumps.App):
         # Status item
         incidents = cs.get("incidents", [])
         errors = cs.get("errors", [])
-        if s_indicator == "none" and not errors:
+        if self._needs_login:
+            self.status_item.title = LOGIN_STATUS_LINE
+        elif s_indicator == "none" and not errors:
             self.status_item.title = "\u2705 All Systems Operational"
         elif errors and s_indicator == "none":
             self.status_item.title = "\u26a0\ufe0f Session error detected"
