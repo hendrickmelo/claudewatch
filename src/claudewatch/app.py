@@ -414,6 +414,20 @@ def format_time_ago(seconds: float) -> str:
     return f"{hours // 24}d ago"
 
 
+# Fraction of the window that must elapse before the burn-rate projection is
+# trusted at full weight. Early on, `used / elapsed` divides by a tiny number,
+# so a single burst of work extrapolates to hundreds of percent — two minutes
+# into a 5h window, 1% used projects to 150%. Ramping the weight in over the
+# first quarter makes the icon track actual usage early and the projection late.
+PROJECTION_RAMP = 0.25
+
+# The projection answers "will this pace exhaust the window", but a window that
+# is already nearly spent is risky at any pace — 99% used with 38m left projects
+# to only 113% (orange). Floor the severity on actual usage as well.
+EXHAUSTED_PCT = 90
+NEARLY_EXHAUSTED_PCT = 80
+
+
 def status_icon(
     used_pct: int, resets_at: float = 0, now: float = 0, window_hours: float = 5
 ) -> str:
@@ -431,16 +445,17 @@ def status_icon(
 
         if time_elapsed > 60 and time_remaining > 0:
             burn_rate = used_pct / time_elapsed  # % per second
-            projected = used_pct + burn_rate * time_remaining
+            confidence = min(1.0, time_elapsed / (PROJECTION_RAMP * window_duration))
+            score = used_pct + confidence * burn_rate * time_remaining
 
-            if projected < 80:
-                return "\U0001f7e2"  # green — on track
-            elif projected < 100:
-                return "\U0001f7e1"  # yellow — might get close
-            elif projected < 130:
-                return "\U0001f7e0"  # orange — likely to hit limit
-            else:
+            if used_pct >= EXHAUSTED_PCT or score >= 130:
                 return "\U0001f534"  # red — well over
+            elif used_pct >= NEARLY_EXHAUSTED_PCT or score >= 100:
+                return "\U0001f7e0"  # orange — likely to hit limit
+            elif score >= 80:
+                return "\U0001f7e1"  # yellow — might get close
+            else:
+                return "\U0001f7e2"  # green — on track
 
     # Fallback: no timing data — apply the <30% shortcut only here, since
     # for long windows (e.g. 7d) the projection above may classify low

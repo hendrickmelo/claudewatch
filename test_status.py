@@ -64,6 +64,36 @@ check("40% used, halfway → yellow", status_icon(40, resets_midpoint, now), "\U
 # Always green below 30% regardless of timing
 check("29% → always green",         status_icon(29, resets_midpoint, now), "\U0001f7e2")
 
+# Early in the window the projection is unreliable — `used / elapsed` divides by
+# a tiny number, so a single burst extrapolated over the remaining hours used to
+# force red within the first few minutes of every session.
+GREEN, YELLOW, ORANGE, RED = "\U0001f7e2", "\U0001f7e1", "\U0001f7e0", "\U0001f534"
+
+
+def at(used: int, elapsed_min: float, window_hours: float = 5) -> str:
+    """status_icon for `used`% at `elapsed_min` into a window."""
+    resets = now + window_hours * 3600 - elapsed_min * 60
+    return status_icon(used, resets, now, window_hours=window_hours)
+
+
+check("1% at 2m in → green",    at(1, 2), GREEN)
+check("2% at 5m in → green",    at(2, 5), GREEN)
+check("5% at 15m in → green",   at(5, 15), GREEN)
+check("10% at 30m in → green",  at(10, 30), GREEN)
+# 24h into a 7-day window is the same situation on a longer scale
+check("10% at 24h into 7d → green", at(10, 24 * 60, window_hours=7 * 24), GREEN)
+
+# Past the ramp the projection carries full weight again
+check("60% at 2h in → red",     at(60, 120), RED)
+check("35% at 2h in → yellow",  at(35, 120), YELLOW)
+check("25% at 2h in → green",   at(25, 120), GREEN)
+
+# A nearly-exhausted window is red no matter how little time is left to burn it
+check("99% with 38m left → red", at(99, 5 * 60 - 38), RED)
+check("90% with 10m left → red", at(90, 5 * 60 - 10), RED)
+check("85% with 10m left → orange", at(85, 5 * 60 - 10), ORANGE)
+check("79% with 10m left → yellow", at(79, 5 * 60 - 10), YELLOW)
+
 # ── 3. Status page indicator → icon ──────────────────────────────────────────
 
 print("\n── Status page indicators ──")
