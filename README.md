@@ -80,6 +80,19 @@ claudewatch
 
 The app appears in your macOS menubar.
 
+## Start at login
+
+```bash
+claudewatch autostart enable    # install the LaunchAgent and start now
+claudewatch autostart status    # show whether it's enabled and running
+claudewatch autostart disable   # remove it
+```
+
+This writes `~/Library/LaunchAgents/com.hendrickmelo.claudewatch.plist` pointing at the
+`claudewatch` you ran it from, so re-run `enable` if you move or reinstall it. Crashes are
+restarted automatically; quitting from the menubar is not. Logs go to
+`~/Library/Logs/claudewatch.{out,err}.log`.
+
 ## How it works
 
 ClaudeWatch pulls data from multiple sources:
@@ -95,7 +108,7 @@ Rate limits are account-wide, so data from any session reflects your total usage
 ## Uninstall
 
 ```bash
-claudewatch uninstall          # remove the statusline hook
+claudewatch uninstall          # remove the statusline hook and the login-item LaunchAgent
 pip uninstall claudewatch      # or: uv tool uninstall claudewatch
 ```
 
