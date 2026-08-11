@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit — refuse commits made directly on a protected branch.
+set -euo pipefail
+
+# shellcheck source=.githooks/common.sh
+. "$(dirname "$0")/common.sh"
+
+# Detached HEAD (rebase, bisect, `git checkout <sha>`) yields no branch name —
+# nothing to protect, so let it through.
+branch="$(git symbolic-ref --short -q HEAD || true)"
+[ -n "$branch" ] || exit 0
+
+is_protected "$branch" || exit 0
+
+if bypass_requested; then
+    dim "pre-commit: CLAUDEWATCH_ALLOW_MAIN=1 — committing directly on '$branch'"
+    exit 0
+fi
+
+red "✗ pre-commit: refusing to commit directly on '$branch'."
+echo
+echo "  Move the work onto a branch and open a PR:"
+echo "      git switch -c feature/<name>      # carries staged changes with you"
+echo "      git commit ..."
+echo
+dim "  Override (rare): CLAUDEWATCH_ALLOW_MAIN=1 git commit ..."
+exit 1
