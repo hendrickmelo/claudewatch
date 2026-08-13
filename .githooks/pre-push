@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# .githooks/pre-push — refuse pushes (including deletes and force-pushes) that
+# target a protected branch on the remote. stdin carries one line per ref:
+#   <local ref> <local sha> <remote ref> <remote sha>
+set -euo pipefail
+
+# shellcheck source=.githooks/common.sh
+. "$(dirname "$0")/common.sh"
+
+blocked=()
+
+while read -r _ local_sha remote_ref _; do
+    case "$remote_ref" in
+        refs/heads/*) branch="${remote_ref#refs/heads/}" ;;
+        *) continue ;; # tags and other refs are fine
+    esac
+    is_protected "$branch" || continue
+    # An all-zero OID means "delete this ref". Matched as a pattern rather than
+    # against a computed zero-sha so it holds for both SHA-1 and SHA-256 repos.
+    if [ -z "${local_sha//0/}" ]; then
+        blocked+=("$branch (delete)")
+    else
+        blocked+=("$branch")
+    fi
+done
+
+[ ${#blocked[@]} -eq 0 ] && exit 0
+
+if bypass_requested; then
+    dim "pre-push: CLAUDEWATCH_ALLOW_MAIN=1 — pushing to ${blocked[*]}"
+    exit 0
+fi
+
+red "✗ pre-push: refusing to push to protected branch: ${blocked[*]}"
+echo
+echo "  '${blocked[0]%% *}' advances only through a PR merge on GitHub:"
+echo "      git push -u origin HEAD"
+echo "      gh pr create"
+echo
+dim "  Override (rare): CLAUDEWATCH_ALLOW_MAIN=1 git push ..."
+exit 1

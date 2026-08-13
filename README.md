@@ -105,3 +105,41 @@ pip uninstall claudewatch      # or: uv tool uninstall claudewatch
 - Python 3.10+
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed
 - `jq` (for the statusline hook)
+
+## Contributing
+
+### Branch protection
+
+`main` advances only through a PR merge, enforced server-side by a repository ruleset. The committed
+hooks in `.githooks/` catch the same mistakes locally, before you have a commit to move:
+
+- **`pre-commit`** rejects a commit made while `main` is checked out. The ruleset can't do this — it
+  only sees a push, by which point the work is already on the wrong branch.
+- **`pre-push`** rejects any push to `main`, including force-pushes and deletes. Feature branches and
+  tags are unaffected.
+
+Run once per clone:
+
+```bash
+./scripts/install-hooks.sh
+```
+
+Because `core.hooksPath` is relative, git resolves it per working tree — worktrees are covered as soon
+as their branch contains `.githooks/`, with no per-worktree setup. Branches that predate it run no hook.
+
+To edit the protected set, change `PROTECTED_BRANCHES` in [`.githooks/common.sh`](.githooks/common.sh).
+For the rare legitimate direct write, set `CLAUDEWATCH_ALLOW_MAIN=1` for the one command:
+
+```bash
+CLAUDEWATCH_ALLOW_MAIN=1 git commit ...
+```
+
+The hooks are a convenience, not a security control — `--no-verify` skips them and a fresh clone has
+none until the script runs. The ruleset is the real gate.
+
+### Checks
+
+```bash
+uv run --extra dev ruff check src/
+uv run python test_status.py
+```

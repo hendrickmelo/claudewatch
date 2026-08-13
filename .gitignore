@@ -1,3 +1,4 @@
+# Python build and packaging artifacts
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -6,4 +7,16 @@ build/
 .eggs/
 *.egg
 .venv/
-*.dist-info/
+
+# Tool caches. Both tools drop a self-ignoring .gitignore inside these, so they
+# stay invisible in a clone where the tool has already run — but nothing here
+# covered them, so a clone that creates them any other way sees them untracked.
+.ruff_cache/
+.remember/
+
+# Claude Code local overrides (machine-specific paths, not for the team)
+.claude/settings.local.json
+.claude/CLAUDE.local.md
+
+# macOS
+.DS_Store

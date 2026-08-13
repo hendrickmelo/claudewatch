@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.sh text eol=lf
+
+# Git hooks have no extension; a CRLF checkout would break the shebang.
+.githooks/pre-commit text eol=lf
+.githooks/pre-push text eol=lf
