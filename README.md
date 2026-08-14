@@ -89,8 +89,8 @@ claudewatch autostart disable   # remove it
 ```
 
 This writes `~/Library/LaunchAgents/com.hendrickmelo.claudewatch.plist` pointing at the
-`claudewatch` you ran it from, so re-run `enable` if you move or reinstall it. Crashes are
-restarted automatically; quitting from the menubar is not. Logs go to
+`claudewatch` you ran it from, so re-run `enable` if you move it to a different location.
+Crashes are restarted automatically; quitting from the menubar is not. Logs go to
 `~/Library/Logs/claudewatch.{out,err}.log`.
 
 ## How it works
