@@ -39,12 +39,13 @@ def _program_arguments() -> list[str]:
     `~/.local/bin`) pointing at a version-stamped target, and following it would pin the
     plist to a path that disappears on upgrade.
 
-    Falls back to the interpreter running us — that one is guaranteed to import
-    claudewatch, whereas a bare `claudewatch` on PATH may resolve to a different
-    environment.
+    Requires a directory component so a bare argv[0] is never resolved against the
+    current directory. Falls back to the interpreter running us — that one is guaranteed
+    to import claudewatch, whereas looking `claudewatch` up on PATH may find a different
+    environment's copy.
     """
     script = Path(sys.argv[0])
-    if script.name == "claudewatch" and script.is_file():
+    if script.parent != Path(".") and script.name == "claudewatch" and script.is_file():
         return [str(script.absolute())]
     return [sys.executable, "-m", "claudewatch"]
 
@@ -131,7 +132,11 @@ def disable():
 
     result = _launchctl("bootout", SERVICE_TARGET)
     if result.returncode not in (0, _NO_SUCH_PROCESS):
-        print(f"Warning: launchctl bootout said: {result.stderr.strip()}", file=sys.stderr)
+        # Removing the plist now would strand a still-loaded job that KeepAlive keeps
+        # restarting, with nothing left on disk for `status` to report it from.
+        print(f"Error: launchctl bootout failed: {result.stderr.strip()}", file=sys.stderr)
+        print(f"Leaving {AGENT_PLIST} in place — the agent may still be loaded.", file=sys.stderr)
+        sys.exit(1)
 
     AGENT_PLIST.unlink()
     print(f"Removed: {AGENT_PLIST}")
