@@ -916,9 +916,7 @@ class ClaudeWatchApp(rumps.App):
 
         # Detect stale data (API in backoff / error state, or login expired)
         data_age = now - latest.get("_mtime", 0)
-        is_stale = self._needs_login or (
-            self._api_backoff > 0 and data_age > API_STALE_THRESHOLD
-        )
+        is_stale = self._needs_login or (self._api_backoff > 0 and data_age > API_STALE_THRESHOLD)
 
         # Menubar title \u2014 show \u26aa when data is stale
         icon = "\u26aa" if is_stale else status_icon(used_5h, resets_at_5h, now)

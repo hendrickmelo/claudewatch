@@ -1,4 +1,4 @@
-"""ClaudeWatch CLI — install hook and launch the menubar app."""
+"""ClaudeWatch CLI — install hook, manage autostart, and launch the menubar app."""
 
 import argparse
 import json
@@ -7,7 +7,7 @@ import sys
 from importlib.resources import files
 from pathlib import Path
 
-from claudewatch import __version__
+from claudewatch import __version__, autostart
 
 CLAUDE_DIR = Path.home() / ".claude"
 SETTINGS_FILE = CLAUDE_DIR / "settings.json"
@@ -131,7 +131,19 @@ def main():
     )
 
     # uninstall
-    subparsers.add_parser("uninstall", help="Remove the statusline hook from Claude Code")
+    subparsers.add_parser(
+        "uninstall", help="Remove the statusline hook and the login-item LaunchAgent"
+    )
+
+    # autostart
+    autostart_parser = subparsers.add_parser("autostart", help="Manage starting at login")
+    autostart_parser.add_argument(
+        "action",
+        nargs="?",
+        default="status",
+        choices=autostart.ACTIONS,
+        help="Default: status",
+    )
 
     args = parser.parse_args()
 
@@ -139,6 +151,11 @@ def main():
         install_hook(chain=args.chain)
     elif args.command == "uninstall":
         uninstall_hook()
+        # Otherwise the LaunchAgent outlives the package and points at a missing binary.
+        if autostart.is_enabled():
+            autostart.disable()
+    elif args.command == "autostart":
+        autostart.ACTIONS[args.action]()
     elif args.command is None:
         # Default: launch the menubar app
         from claudewatch.app import run
