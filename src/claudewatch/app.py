@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import rumps
-from AppKit import NSColor, NSFontWeightRegular, NSImage, NSImageSymbolConfiguration
+from AppKit import NSBezierPath, NSColor, NSImage
 
 from .codex import fetch_codex_usage
 
@@ -33,7 +33,9 @@ LOGIN_TITLE = "🔑 login"
 LOGIN_STATUS_LINE = "🔑 Claude login expired — run claude and log in again"
 API_LOG = Path.home() / ".claude" / "claudewatch-api.log"
 SETTINGS_FILE = Path.home() / "Library" / "Application Support" / "ClaudeWatch" / "settings.json"
-COMPACT_SYMBOL = "gauge.with.dots.needle.50percent"
+COMPACT_ICON_SIZE = 14
+COMPACT_ICON_CORNER_RADIUS = 3
+COMPACT_ICON_BORDER_WIDTH = 1
 
 STATUS_PAGE_URL = "https://status.claude.com/api/v2/summary.json"
 STATUS_POLL_INTERVAL = 60  # 1 minute
@@ -850,26 +852,35 @@ class ClaudeWatchApp(rumps.App):
         self._apply_status_presentation(self._last_verbose_title)
 
     def _make_compact_icon(self, severity: str):
-        """Create a native SF Symbol tinted for the aggregate usage state."""
+        """Draw a mostly solid status-color squircle for the aggregate usage state."""
         colors = {
             "green": NSColor.systemGreenColor(),
             "yellow": NSColor.systemYellowColor(),
             "orange": NSColor.systemOrangeColor(),
             "red": NSColor.systemRedColor(),
         }
-        image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-            COMPACT_SYMBOL, "ClaudeWatch usage status"
-        )
-        if image is None:
-            return None
-        size = NSImageSymbolConfiguration.configurationWithPointSize_weight_(
-            15, NSFontWeightRegular
-        )
-        color = NSImageSymbolConfiguration.configurationWithHierarchicalColor_(
-            colors.get(severity, NSColor.systemGreenColor())
-        )
-        configuration = size.configurationByApplyingConfiguration_(color)
-        return image.imageWithSymbolConfiguration_(configuration)
+        image = NSImage.alloc().initWithSize_((COMPACT_ICON_SIZE, COMPACT_ICON_SIZE))
+        image.lockFocus()
+        try:
+            inset = COMPACT_ICON_BORDER_WIDTH / 2
+            side = COMPACT_ICON_SIZE - COMPACT_ICON_BORDER_WIDTH
+            path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                ((inset, inset), (side, side)),
+                COMPACT_ICON_CORNER_RADIUS,
+                COMPACT_ICON_CORNER_RADIUS,
+            )
+            colors.get(severity, NSColor.systemGreenColor()).setFill()
+            path.fill()
+            NSColor.separatorColor().colorWithAlphaComponent_(0.5).setStroke()
+            path.setLineWidth_(COMPACT_ICON_BORDER_WIDTH)
+            path.stroke()
+        finally:
+            image.unlockFocus()
+
+        # A template image would be recolored monochrome by macOS, defeating the
+        # status signal. Preserve the native system status color instead.
+        image.setTemplate_(False)
+        return image
 
     def _apply_status_presentation(self, verbose_title: str):
         """Apply either the detailed title or the persistent compact SF Symbol."""

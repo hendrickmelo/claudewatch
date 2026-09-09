@@ -12,9 +12,13 @@ import urllib.request
 
 sys.path.insert(0, "src")
 
+from AppKit import NSBitmapImageRep
+
 import claudewatch.app as app
 from claudewatch.app import (
+    COMPACT_ICON_SIZE,
     STATUS_ICONS,
+    ClaudeWatchApp,
     _is_real_error,
     fetch_claude_status,
     format_countdown,
@@ -77,7 +81,25 @@ check(
     YELLOW,
 )
 
-# ── 3. Status page indicator → icon ──────────────────────────────────────────
+# ── 3. Solid compact icon ────────────────────────────────────────────────────
+
+print("\n── Solid compact squircle ──")
+icon_maker = ClaudeWatchApp.__new__(ClaudeWatchApp)
+for severity in ("green", "yellow", "orange", "red"):
+    image = icon_maker._make_compact_icon(severity)
+    rep = NSBitmapImageRep.imageRepWithData_(image.TIFFRepresentation())
+    pixel_count = rep.pixelsWide() * rep.pixelsHigh()
+    filled_pixels = sum(
+        1
+        for x in range(rep.pixelsWide())
+        for y in range(rep.pixelsHigh())
+        if rep.colorAtX_y_(x, y).alphaComponent() > 0.5
+    )
+    check(f"{severity} icon is {COMPACT_ICON_SIZE}×{COMPACT_ICON_SIZE}", image.size().width, 14)
+    check(f"{severity} icon preserves color", image.isTemplate(), False)
+    check(f"{severity} icon is mostly solid", filled_pixels / pixel_count >= 0.85, True)
+
+# ── 4. Status page indicator → icon ──────────────────────────────────────────
 
 print("\n── Status page indicators ──")
 for indicator, expected_icon in [
