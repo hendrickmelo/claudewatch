@@ -462,9 +462,51 @@ def format_time_ago(seconds: float) -> str:
     return f"{hours // 24}d ago"
 
 
-def usage_severity(used_pct: object) -> str:
-    """Classify current usage using fixed, non-predictive percentage bands."""
+PROJECTION_RAMP = 0.25
+EXHAUSTED_PCT = 90
+NEARLY_EXHAUSTED_PCT = 80
+
+
+def projected_usage(
+    used_pct: object, resets_at: float = 0, now: float = 0, window_hours: float = 5
+) -> float | None:
+    """Project end-of-window usage, ramping confidence during the first quarter."""
     used = float(used_pct) if isinstance(used_pct, (int, float)) else 0.0
+    if not resets_at or not now or window_hours <= 0:
+        return None
+
+    window_duration = window_hours * 3600
+    window_start = resets_at - window_duration
+    time_elapsed = now - window_start
+    time_remaining = resets_at - now
+    if time_elapsed <= 60 or time_remaining <= 0:
+        return None
+
+    burn_rate = used / time_elapsed
+    confidence = min(1.0, time_elapsed / (PROJECTION_RAMP * window_duration))
+    return used + confidence * burn_rate * time_remaining
+
+
+def usage_severity(
+    used_pct: object,
+    resets_at: float = 0,
+    now: float = 0,
+    window_hours: float = 5,
+    use_projections: bool = False,
+) -> str:
+    """Classify usage with fixed bands or an optional burn-rate projection."""
+    used = float(used_pct) if isinstance(used_pct, (int, float)) else 0.0
+    if use_projections:
+        projected = projected_usage(used, resets_at, now, window_hours)
+        if projected is not None:
+            if used >= EXHAUSTED_PCT or projected >= 130:
+                return "red"
+            if used >= NEARLY_EXHAUSTED_PCT or projected >= 100:
+                return "orange"
+            if projected >= 80:
+                return "yellow"
+            return "green"
+
     if used >= 90:
         return "red"
     if used >= 75:
@@ -475,20 +517,34 @@ def usage_severity(used_pct: object) -> str:
 
 
 def status_icon(
-    used_pct: int, resets_at: float = 0, now: float = 0, window_hours: float = 5
+    used_pct: int,
+    resets_at: float = 0,
+    now: float = 0,
+    window_hours: float = 5,
+    use_projections: bool = False,
 ) -> str:
-    """Return a colored circle based only on the current percentage used.
-
-    Timing arguments remain accepted for compatibility with existing callers,
-    but deliberately do not influence the result.
-    """
-    del resets_at, now, window_hours
+    """Return a colored circle using fixed usage or optional projection bands."""
+    severity = usage_severity(used_pct, resets_at, now, window_hours, use_projections)
     return {
         "green": "🟢",
         "yellow": "🟡",
         "orange": "🟠",
         "red": "🔴",
-    }[usage_severity(used_pct)]
+    }[severity]
+
+
+def projection_note(
+    used_pct: object,
+    resets_at: float,
+    now: float,
+    window_hours: float,
+    use_projections: bool,
+) -> str:
+    """Format a projection note when projection mode has enough timing data."""
+    if not use_projections:
+        return ""
+    projected = projected_usage(used_pct, resets_at, now, window_hours)
+    return f" · projects to {format_pct(projected)}%" if projected is not None else ""
 
 
 def compact_severity(icon: str) -> str:
@@ -502,7 +558,7 @@ def compact_severity(icon: str) -> str:
 
 
 def worst_severity(*levels: str) -> str:
-    """Return the highest current-usage severity across all limit windows."""
+    """Return the highest selected-mode severity across all limit windows."""
     rank = {"green": 0, "yellow": 1, "orange": 2, "red": 3}
     return max(levels or ("green",), key=lambda level: rank.get(level, 0))
 
@@ -758,6 +814,7 @@ class ClaudeWatchApp(rumps.App):
         }
         settings = load_settings()
         self._compact_mode = bool(settings.get("compact_mode", False))
+        self._use_projections = bool(settings.get("use_projections", False))
         self._claude_compact_detail = "Claude: no data"
         self._codex_compact_detail = "Codex: no data"
         self._claude_compact_severity = "green"
@@ -782,6 +839,8 @@ class ClaudeWatchApp(rumps.App):
         self._recent_header_key = "Recent Sessions"
         self.compact_mode_item = rumps.MenuItem("Compact Mode", callback=self.toggle_compact_mode)
         self.compact_mode_item.state = 1 if self._compact_mode else 0
+        self.projections_item = rumps.MenuItem("Use Projections", callback=self.toggle_projections)
+        self.projections_item.state = 1 if self._use_projections else 0
 
         self.menu = [
             self.rate_5h,
@@ -795,6 +854,7 @@ class ClaudeWatchApp(rumps.App):
             self.recent_header,
             None,
             self.compact_mode_item,
+            self.projections_item,
             rumps.MenuItem("🔄 Refresh Now", callback=self.refresh),
             rumps.MenuItem("Quit", callback=rumps.quit_application),
         ]
@@ -851,6 +911,15 @@ class ClaudeWatchApp(rumps.App):
         save_settings(settings)
         self._apply_status_presentation(self._last_verbose_title)
 
+    def toggle_projections(self, _sender=None):
+        """Toggle projection-based severity independently from compact mode."""
+        self._use_projections = not self._use_projections
+        self.projections_item.state = 1 if self._use_projections else 0
+        settings = load_settings()
+        settings["use_projections"] = self._use_projections
+        save_settings(settings)
+        self.refresh()
+
     def _make_compact_icon(self, severity: str):
         """Draw a mostly solid status-color squircle for the aggregate usage state."""
         colors = {
@@ -885,7 +954,8 @@ class ClaudeWatchApp(rumps.App):
     def _apply_status_presentation(self, verbose_title: str):
         """Apply either the detailed title or the persistent compact SF Symbol."""
         severity = worst_severity(self._claude_compact_severity, self._codex_compact_severity)
-        tooltip = "ClaudeWatch\n" + "\n".join(
+        projection_mode = "on" if self._use_projections else "off"
+        tooltip = f"ClaudeWatch · projections {projection_mode}\n" + "\n".join(
             (self._claude_compact_detail, self._codex_compact_detail)
         )
 
@@ -1083,16 +1153,26 @@ class ClaudeWatchApp(rumps.App):
         data_age = now - latest.get("_mtime", 0)
         is_stale = self._needs_login or (self._api_backoff > 0 and data_age > API_STALE_THRESHOLD)
 
-        current_icon_5h = status_icon(used_5h)
-        current_icon_7d = status_icon(used_7d)
+        current_icon_5h = status_icon(
+            used_5h, resets_at_5h, now, use_projections=self._use_projections
+        )
+        current_icon_7d = status_icon(
+            used_7d,
+            resets_at_7d,
+            now,
+            window_hours=7 * 24,
+            use_projections=self._use_projections,
+        )
+        projection_5h = projection_note(used_5h, resets_at_5h, now, 5, self._use_projections)
+        projection_7d = projection_note(used_7d, resets_at_7d, now, 7 * 24, self._use_projections)
 
         # Menubar title — show ⚪ when data is stale. Compact mode still uses
         # the cached percentages and makes the staleness explicit in its tooltip.
         icon = "⚪" if is_stale else current_icon_5h
 
         # Append status icon to the detailed title if Claude is having issues.
-        # Service health does not change the compact usage indicator, whose
-        # color is strictly the worst current rate-limit percentage.
+        # Service health does not change the compact usage indicator, which is
+        # based on either current percentages or projections according to settings.
         cs = self._claude_status
         s_indicator = cs.get("indicator", "none")
         s_icon = STATUS_ICONS.get(s_indicator, "")
@@ -1107,8 +1187,9 @@ class ClaudeWatchApp(rumps.App):
             "Claude: login required"
             if self._needs_login
             else (
-                f"Claude: 5-hour {format_pct(used_5h)}% · resets in {countdown_text_5h}; "
-                f"7-day {format_pct(used_7d)}% · resets in {countdown_text_7d}"
+                f"Claude: 5-hour {format_pct(used_5h)}%{projection_5h} · "
+                f"resets in {countdown_text_5h}; 7-day {format_pct(used_7d)}%"
+                f"{projection_7d} · resets in {countdown_text_7d}"
             )
         )
         if is_stale:
@@ -1125,15 +1206,15 @@ class ClaudeWatchApp(rumps.App):
             datetime.fromtimestamp(resets_at_7d).strftime("%a %-I:%M %p") if resets_at_7d else "?"
         )
 
-        icon_5h = "\u26aa" if is_stale else status_icon(used_5h, resets_at_5h, now)
-        icon_7d = (
-            "\u26aa" if is_stale else status_icon(used_7d, resets_at_7d, now, window_hours=7 * 24)
-        )
+        icon_5h = "\u26aa" if is_stale else current_icon_5h
+        icon_7d = "\u26aa" if is_stale else current_icon_7d
         self.rate_5h.title = (
-            f"{icon_5h} 5-hour:  {format_pct(used_5h)}% used  (resets {reset_time_5h})"
+            f"{icon_5h} 5-hour:  {format_pct(used_5h)}% used{projection_5h}  "
+            f"(resets {reset_time_5h})"
         )
         self.rate_7d.title = (
-            f"{icon_7d} 7-day:   {format_pct(used_7d)}% used  (resets {reset_time_7d})"
+            f"{icon_7d} 7-day:   {format_pct(used_7d)}% used{projection_7d}  "
+            f"(resets {reset_time_7d})"
         )
 
         # Tooltip: show last successful fetch time
@@ -1223,15 +1304,24 @@ class ClaudeWatchApp(rumps.App):
         used = summary_window.get("used_percentage", 0)
         resets_at = summary_window.get("resets_at", 0)
         window_minutes = summary_window.get("window_minutes", 0)
+        window_hours = max(window_minutes / 60, 1)
         countdown = format_countdown(max(0, resets_at - now))
-        icon = (
-            "⚪"
-            if is_stale
-            else status_icon(used, resets_at, now, window_hours=max(window_minutes / 60, 1))
+        summary_icon = status_icon(
+            used,
+            resets_at,
+            now,
+            window_hours=window_hours,
+            use_projections=self._use_projections,
         )
+        summary_projection = projection_note(
+            used, resets_at, now, window_hours, self._use_projections
+        )
+        icon = "⚪" if is_stale else summary_icon
 
-        self.codex_rates.title = f"Codex: {icon} {format_pct(used)}% used  (resets in {countdown})"
-        compact_severities = [compact_severity(status_icon(used))]
+        self.codex_rates.title = (
+            f"Codex: {icon} {format_pct(used)}% used{summary_projection}  (resets in {countdown})"
+        )
+        compact_severities = [compact_severity(summary_icon)]
         compact_details: list[str] = []
 
         state_messages = {
@@ -1251,15 +1341,21 @@ class ClaudeWatchApp(rumps.App):
                 window_used = window.get("used_percentage", 0)
                 window_reset = window.get("resets_at", 0)
                 window_minutes = window.get("window_minutes", 0)
-                window_icon = (
-                    "⚪"
-                    if is_stale
-                    else status_icon(
-                        window_used,
-                        window_reset,
-                        now,
-                        window_hours=max(window_minutes / 60, 1),
-                    )
+                window_hours = max(window_minutes / 60, 1)
+                current_window_icon = status_icon(
+                    window_used,
+                    window_reset,
+                    now,
+                    window_hours=window_hours,
+                    use_projections=self._use_projections,
+                )
+                window_icon = "⚪" if is_stale else current_window_icon
+                window_projection = projection_note(
+                    window_used,
+                    window_reset,
+                    now,
+                    window_hours,
+                    self._use_projections,
                 )
                 reset_format = "%a %-I:%M %p" if window_minutes >= 1440 else "%-I:%M %p"
                 reset_text = (
@@ -1271,13 +1367,14 @@ class ClaudeWatchApp(rumps.App):
                 self.codex_rates.add(
                     rumps.MenuItem(
                         f"{window_icon} {limit_name} · {duration}: "
-                        f"{format_pct(window_used)}% used  (resets {reset_text})",
+                        f"{format_pct(window_used)}% used{window_projection}  "
+                        f"(resets {reset_text})",
                         callback=None,
                     )
                 )
-                compact_severities.append(compact_severity(status_icon(window_used)))
+                compact_severities.append(compact_severity(current_window_icon))
                 compact_details.append(
-                    f"{limit_name} {duration} {format_pct(window_used)}% · "
+                    f"{limit_name} {duration} {format_pct(window_used)}%{window_projection} · "
                     f"resets in {format_countdown(max(0, window_reset - now))}"
                 )
 

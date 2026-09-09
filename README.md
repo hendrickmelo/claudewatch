@@ -88,14 +88,18 @@ The app appears in your macOS menubar.
 
 Choose **Compact Mode** in the dropdown to replace the text with a 14 px filled macOS-style squircle. A subtle adaptive border keeps it visible against light and dark menu bars. The setting persists in `~/Library/Application Support/ClaudeWatch/settings.json`.
 
-Compact mode uses fixed current-usage thresholds—there is no burn-rate projection:
+Compact mode and projection mode are independent. Choose **Use Projections** in the same menu to turn burn-rate forecasting on or off; both choices persist in `~/Library/Application Support/ClaudeWatch/settings.json`.
+
+With projections off (the default), colors use fixed current-usage thresholds:
 
 - **Green:** below 50% used
 - **Yellow:** 50% through 74% used
 - **Orange:** 75% through 89% used
 - **Red:** 90% used or higher
 
-The worst current percentage across both Claude windows and every Codex window determines the symbol color. Hover the symbol for usage and reset details, or click it for the complete menu.
+With projections on, ClaudeWatch estimates end-of-window usage from the current burn rate. Projected usage below 80% is green, 80–99% is yellow, 100–129% is orange, and 130% or higher is red. Actual usage of at least 80% floors the result at orange, and 90% floors it at red. When reset timing is unavailable, it falls back to the fixed bands above.
+
+The worst result across both Claude windows and every Codex window determines the symbol color. Menus and hover details show the projected percentage when enabled. Hover the symbol for usage and reset details, or click it for the complete menu.
 
 ## Start at login
 
