@@ -15,6 +15,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: uv sync
       - run: uv run python test_status.py
+      - run: uv run python test_codex.py
 
   lint:
     runs-on: macos-latest

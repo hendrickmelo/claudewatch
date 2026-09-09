@@ -4,15 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "claudewatch"
-version = "0.1.0"
-description = "macOS menubar app showing Claude Code rate limits and session status"
+version = "0.2.0"
+description = "macOS menubar app showing Claude Code and Codex rate limits and session status"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
     { name = "Hendrick Melo" },
 ]
-keywords = ["claude", "claude-code", "menubar", "macos", "rate-limit", "t3"]
+keywords = ["claude", "claude-code", "codex", "menubar", "macos", "rate-limit", "t3"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: MacOS X",

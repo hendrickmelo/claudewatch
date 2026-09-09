@@ -14,6 +14,8 @@ from pathlib import Path
 
 import rumps
 
+from .codex import fetch_codex_usage
+
 CLAUDE_DIR = Path.home() / ".claude"
 SESSIONS_DIR = CLAUDE_DIR / "sessions"
 STATUS_DIR = CLAUDE_DIR / "status"
@@ -22,6 +24,8 @@ PROJECTS_DIR = CLAUDE_DIR / "projects"
 POLL_INTERVAL = 5  # seconds
 API_POLL_INTERVAL = 60  # seconds
 API_STALE_THRESHOLD = 300  # only poll API if no status update in 5 minutes
+CODEX_API_POLL_INTERVAL = 60  # seconds
+CODEX_API_STALE_THRESHOLD = 300
 KEYCHAIN_WATCH_INTERVAL = 30  # needs-login: how often to check keychain for a new login
 
 LOGIN_TITLE = "🔑 login"
@@ -382,11 +386,32 @@ def format_countdown(seconds: float) -> str:
     """Format seconds into a human-readable countdown."""
     if seconds <= 0:
         return "now"
-    hours = int(seconds // 3600)
+    days = int(seconds // 86400)
+    hours = int((seconds % 86400) // 3600)
     minutes = int((seconds % 3600) // 60)
+    if days > 0:
+        return f"{days}d{hours:02d}h"
     if hours > 0:
         return f"{hours}h{minutes:02d}m"
     return f"{minutes}m"
+
+
+def format_window_duration(minutes: object) -> str:
+    """Format a rate-limit window duration for compact menu labels."""
+    if not isinstance(minutes, (int, float)) or minutes <= 0:
+        return "window"
+    rounded = round(minutes)
+    if rounded == 300:
+        return "5-hour"
+    if rounded == 10080:
+        return "7-day"
+    if rounded % 1440 == 0:
+        days = rounded // 1440
+        return f"{days}-day"
+    if rounded % 60 == 0:
+        hours = rounded // 60
+        return f"{hours}-hour"
+    return f"{rounded}-minute"
 
 
 def format_pct(value: object) -> str:
@@ -707,6 +732,11 @@ class ClaudeWatchApp(rumps.App):
         self._needs_login = False  # OAuth session dead; user must run `claude` and log in
         self._needs_login_token: str | None = None  # access token that failed, if any
         self._last_keychain_check = 0.0
+        self._codex_rate_limits: dict | None = self._load_codex_cache()
+        self._last_codex_poll = 0.0
+        self._last_codex_success = 0.0
+        self._codex_backoff = 0
+        self._codex_state: str | None = None
         self._last_status_poll = 0.0
         self._claude_status: dict = {
             "indicator": "none",
@@ -721,6 +751,7 @@ class ClaudeWatchApp(rumps.App):
         self.rate_7d = rumps.MenuItem(
             "7-day: --", callback=lambda _: webbrowser.open("https://claude.ai/settings/usage")
         )
+        self.codex_rates = rumps.MenuItem("Codex: --", callback=None)
         self.last_updated = rumps.MenuItem("Last updated: --", callback=None)
         self.status_item = rumps.MenuItem(
             "✅ All Systems Operational",
@@ -734,6 +765,7 @@ class ClaudeWatchApp(rumps.App):
         self.menu = [
             self.rate_5h,
             self.rate_7d,
+            self.codex_rates,
             self.last_updated,
             self.status_item,
             None,
@@ -750,6 +782,7 @@ class ClaudeWatchApp(rumps.App):
 
     _API_POLL_CACHE = CLAUDE_DIR / "claudewatch-api-poll.txt"
     _API_DATA_CACHE = CLAUDE_DIR / "claudewatch-api-cache.json"
+    _CODEX_DATA_CACHE = CLAUDE_DIR / "claudewatch-codex-cache.json"
 
     def _load_api_poll_time(self) -> float:
         """Load the last API poll timestamp from disk."""
@@ -774,6 +807,18 @@ class ClaudeWatchApp(rumps.App):
         """Persist API rate limit data to disk."""
         with contextlib.suppress(OSError):
             self._API_DATA_CACHE.write_text(json.dumps(data))
+
+    def _load_codex_cache(self) -> dict | None:
+        """Load cached Codex rate-limit data from disk."""
+        try:
+            return json.loads(self._CODEX_DATA_CACHE.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def _save_codex_cache(self, data: dict):
+        """Persist Codex rate-limit data to disk."""
+        with contextlib.suppress(OSError):
+            self._CODEX_DATA_CACHE.write_text(json.dumps(data))
 
     def refresh(self, sender=None):
         """Poll status files and update the menubar."""
@@ -871,6 +916,32 @@ class ClaudeWatchApp(rumps.App):
                 next_interval = API_POLL_INTERVAL * (2**self._api_backoff)
                 _log_api(f"BACKOFF  next poll in {next_interval:.0f}s (non-429)")
 
+        # Codex exposes account limits through its local app-server. Poll it
+        # independently from Claude because neither source implies freshness of
+        # the other.
+        codex_poll_interval = CODEX_API_POLL_INTERVAL * (2**self._codex_backoff)
+        should_poll_codex = (
+            force
+            or self._last_codex_poll == 0.0
+            or now - self._last_codex_poll > codex_poll_interval
+        )
+        if should_poll_codex:
+            codex_data = fetch_codex_usage()
+            self._last_codex_poll = now
+            if isinstance(codex_data, dict):
+                codex_data["_mtime"] = now
+                self._codex_rate_limits = codex_data
+                self._last_codex_success = now
+                self._codex_backoff = 0
+                self._codex_state = None
+                self._save_codex_cache(codex_data)
+            elif codex_data in ("needs_login", "not_installed"):
+                self._codex_state = codex_data
+                self._codex_backoff = 0
+            else:
+                self._codex_state = "error"
+                self._codex_backoff = min(self._codex_backoff + 1, 6)
+
         # Per-session statuses: only for alive sessions within the window
         sessions = get_active_sessions()
         statuses = get_session_statuses(sessions, window_start)
@@ -890,6 +961,8 @@ class ClaudeWatchApp(rumps.App):
             self._last_status_poll = now
 
         self._update_rate_limits(latest, latest_activity, now)
+        codex_title = self._update_codex_rate_limits(now)
+        self.title = f"C:{self.title}  X:{codex_title}"
         self._update_sessions(sessions, statuses, transcript_info, t3_threads, now)
 
     def _update_rate_limits(self, latest: dict | None, latest_activity: float, now: float):
@@ -989,6 +1062,117 @@ class ClaudeWatchApp(rumps.App):
         # "Last updated" uses the most recent activity (status OR transcript)
         age = now - latest_activity if latest_activity > 0 else now - latest["_mtime"]
         self.last_updated.title = f"Last active: {format_time_ago(age)}"
+
+    def _update_codex_rate_limits(self, now: float) -> str:
+        """Update the Codex menu and return its compact menubar segment."""
+        if self.codex_rates:
+            self.codex_rates.clear()
+        latest = self._codex_rate_limits
+
+        if not latest:
+            if self._codex_state == "needs_login":
+                self.codex_rates.title = "Codex: login required"
+                self.codex_rates.add(rumps.MenuItem("Run codex login", callback=None))
+                return "🔑login"
+            if self._codex_state == "not_installed":
+                self.codex_rates.title = "Codex: CLI not found"
+                return "--"
+            if self._codex_state == "error":
+                self.codex_rates.title = "Codex: unavailable"
+                return "⚪--"
+            self.codex_rates.title = "Codex: no data"
+            return "--"
+
+        limits = latest.get("limits", [])
+        if not isinstance(limits, list) or not limits:
+            self.codex_rates.title = "Codex: no rate-limit data"
+            return "--"
+
+        main = next((item for item in limits if item.get("id") == "codex"), limits[0])
+        summary_window = main.get("primary") or main.get("secondary")
+        if not summary_window:
+            self.codex_rates.title = "Codex: no active limit window"
+            return "--"
+
+        data_age = now - latest.get("_mtime", 0)
+        is_stale = bool(self._codex_state) or (
+            self._codex_backoff > 0 and data_age > CODEX_API_STALE_THRESHOLD
+        )
+        used = summary_window.get("used_percentage", 0)
+        resets_at = summary_window.get("resets_at", 0)
+        window_minutes = summary_window.get("window_minutes", 0)
+        countdown = format_countdown(max(0, resets_at - now))
+        icon = (
+            "⚪"
+            if is_stale
+            else status_icon(used, resets_at, now, window_hours=max(window_minutes / 60, 1))
+        )
+
+        self.codex_rates.title = f"Codex: {icon} {format_pct(used)}% used  (resets in {countdown})"
+
+        state_messages = {
+            "needs_login": "🔑 Login required — run codex login",
+            "not_installed": "⚪ Codex CLI not found — showing cached data",
+            "error": "⚪ Refresh failed — showing cached data",
+        }
+        if self._codex_state in state_messages:
+            self.codex_rates.add(rumps.MenuItem(state_messages[self._codex_state], callback=None))
+
+        for limit in limits:
+            limit_name = limit.get("name") or limit.get("id") or "Codex"
+            for key in ("primary", "secondary"):
+                window = limit.get(key)
+                if not window:
+                    continue
+                window_used = window.get("used_percentage", 0)
+                window_reset = window.get("resets_at", 0)
+                window_minutes = window.get("window_minutes", 0)
+                window_icon = (
+                    "⚪"
+                    if is_stale
+                    else status_icon(
+                        window_used,
+                        window_reset,
+                        now,
+                        window_hours=max(window_minutes / 60, 1),
+                    )
+                )
+                reset_format = "%a %-I:%M %p" if window_minutes >= 1440 else "%-I:%M %p"
+                reset_text = (
+                    datetime.fromtimestamp(window_reset).strftime(reset_format)
+                    if window_reset
+                    else "?"
+                )
+                duration = format_window_duration(window_minutes)
+                self.codex_rates.add(
+                    rumps.MenuItem(
+                        f"{window_icon} {limit_name} · {duration}: "
+                        f"{format_pct(window_used)}% used  (resets {reset_text})",
+                        callback=None,
+                    )
+                )
+
+            credits = limit.get("credits")
+            if isinstance(credits, dict) and credits.get("hasCredits"):
+                balance = credits.get("balance")
+                credit_text = "unlimited" if credits.get("unlimited") else (balance or "available")
+                self.codex_rates.add(
+                    rumps.MenuItem(f"Credits · {limit_name}: {credit_text}", callback=None)
+                )
+            if limit.get("rate_limit_reached_type"):
+                self.codex_rates.add(
+                    rumps.MenuItem(f"⚠️ {limit_name}: rate limit reached", callback=None)
+                )
+
+        if self._last_codex_success:
+            age = format_time_ago(now - self._last_codex_success)
+            tooltip = f"Stale — last updated {age}" if is_stale else f"Last updated {age}"
+        else:
+            tooltip = "Using cached Codex rate-limit data"
+        with contextlib.suppress(AttributeError):
+            self.codex_rates._menuitem.setToolTip_(tooltip)
+
+        return f"{icon}{format_pct(used)}%↻{countdown}"
 
     def _update_sessions(
         self,

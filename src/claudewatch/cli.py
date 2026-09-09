@@ -115,7 +115,7 @@ def uninstall_hook():
 def main():
     parser = argparse.ArgumentParser(
         prog="claudewatch",
-        description="ClaudeWatch — macOS menubar app for Claude Code status",
+        description="ClaudeWatch — macOS menubar app for Claude Code and Codex limits",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 

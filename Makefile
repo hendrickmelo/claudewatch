@@ -12,3 +12,4 @@ lint:
 
 test:
 	uv run python test_status.py
+	uv run python test_codex.py
