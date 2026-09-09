@@ -33,6 +33,7 @@ Other Claude clients (claude.ai web, Claude desktop app) are **not** tracked —
 ## Limitations
 
 - **macOS only** — uses native menubar via PyObjC/rumps
+- **Python 3.12+** — required by the versioned settings serializer
 - **Claude Max subscription** — Claude rate limit data comes from the OAuth usage API, which requires a Claude Max account
 - **Codex login required** — Codex limits come from the installed Codex CLI's local app-server protocol
 - **Experimental** — built for personal use, lightly tested, expect bugs
@@ -89,6 +90,8 @@ The app appears in your macOS menubar.
 Choose **Compact Mode** in the dropdown to replace the text with a 14 px filled macOS-style squircle. A subtle adaptive border keeps it visible against light and dark menu bars. The setting persists in `~/Library/Application Support/ClaudeWatch/settings.json`.
 
 Compact mode and projection mode are independent. Choose **Use Projections** in the same menu to turn burn-rate forecasting on or off; both choices persist in `~/Library/Application Support/ClaudeWatch/settings.json`.
+
+The settings file is serialized by Hendrick Melo's [versionable](https://github.com/hendrickmelo/versionable) library and includes a schema version and hash. Existing unversioned ClaudeWatch settings are upgraded in place the first time they are loaded, preserving both preferences.
 
 With projections off (the default), colors use fixed current-usage thresholds:
 

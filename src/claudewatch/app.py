@@ -16,6 +16,7 @@ import rumps
 from AppKit import NSBezierPath, NSColor, NSImage
 
 from .codex import fetch_codex_usage
+from .settings import load_settings, save_settings
 
 CLAUDE_DIR = Path.home() / ".claude"
 SESSIONS_DIR = CLAUDE_DIR / "sessions"
@@ -32,7 +33,6 @@ KEYCHAIN_WATCH_INTERVAL = 30  # needs-login: how often to check keychain for a n
 LOGIN_TITLE = "🔑 login"
 LOGIN_STATUS_LINE = "🔑 Claude login expired — run claude and log in again"
 API_LOG = Path.home() / ".claude" / "claudewatch-api.log"
-SETTINGS_FILE = Path.home() / "Library" / "Application Support" / "ClaudeWatch" / "settings.json"
 COMPACT_ICON_SIZE = 14
 COMPACT_ICON_CORNER_RADIUS = 3
 COMPACT_ICON_BORDER_WIDTH = 1
@@ -61,24 +61,6 @@ def _log_api(msg: str):
     try:
         with open(API_LOG, "a") as f:
             f.write(f"{ts}  {msg}\n")
-    except OSError:
-        pass
-
-
-def load_settings() -> dict:
-    """Load persistent display settings, tolerating missing or corrupt files."""
-    try:
-        data = json.loads(SETTINGS_FILE.read_text())
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def save_settings(settings: dict):
-    """Persist display settings in the standard macOS application-support directory."""
-    try:
-        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        SETTINGS_FILE.write_text(json.dumps(settings, indent=2, sort_keys=True) + "\n")
     except OSError:
         pass
 
