@@ -22,6 +22,8 @@ from claudewatch.app import (
     _is_real_error,
     fetch_claude_status,
     format_countdown,
+    projected_usage,
+    projection_note,
     status_icon,
 )
 
@@ -81,7 +83,48 @@ check(
     YELLOW,
 )
 
-# ── 3. Solid compact icon ────────────────────────────────────────────────────
+# ── 3. Optional burn-rate projections ────────────────────────────────────────
+
+print("\n── Optional projection color logic ──")
+
+
+def projected_icon(used: int, elapsed_minutes: float, window_hours: float = 5) -> str:
+    resets_at = now + window_hours * 3600 - elapsed_minutes * 60
+    return status_icon(
+        used,
+        resets_at,
+        now,
+        window_hours=window_hours,
+        use_projections=True,
+    )
+
+
+check("50% halfway → orange", projected_icon(50, 150), ORANGE)
+check("40% halfway → yellow", projected_icon(40, 150), YELLOW)
+check("30% halfway → green", projected_icon(30, 150), GREEN)
+check("60% at 2h → red", projected_icon(60, 120), RED)
+check("85% near reset → orange", projected_icon(85, 290), ORANGE)
+check("90% near reset → red", projected_icon(90, 290), RED)
+check(
+    "projection off ignores timing",
+    status_icon(40, now + 2.5 * 3600, now, use_projections=False),
+    GREEN,
+)
+check(
+    "projection falls back to fixed bands without timing",
+    status_icon(60, use_projections=True),
+    YELLOW,
+)
+projected = projected_usage(50, now + 2.5 * 3600, now, 5)
+check("half-window projection reaches 100%", round(projected), 100)
+check(
+    "projection note is shown when enabled",
+    projection_note(50, now + 2.5 * 3600, now, 5, True),
+    " · projects to 100%",
+)
+check("projection note is hidden when disabled", projection_note(50, now, now, 5, False), "")
+
+# ── 4. Solid compact icon ────────────────────────────────────────────────────
 
 print("\n── Solid compact squircle ──")
 icon_maker = ClaudeWatchApp.__new__(ClaudeWatchApp)
@@ -99,7 +142,32 @@ for severity in ("green", "yellow", "orange", "red"):
     check(f"{severity} icon preserves color", image.isTemplate(), False)
     check(f"{severity} icon is mostly solid", filled_pixels / pixel_count >= 0.85, True)
 
-# ── 4. Status page indicator → icon ──────────────────────────────────────────
+# Projection and compact mode are independent settings, and toggling projection
+# must preserve other keys already stored in the settings file.
+settings_test_app = ClaudeWatchApp.__new__(ClaudeWatchApp)
+settings_test_app._use_projections = False
+settings_test_app.projections_item = type("MenuItem", (), {"state": 0})()
+refreshes = []
+settings_test_app.refresh = lambda: refreshes.append(True)
+saved_settings = []
+original_load_settings = app.load_settings
+original_save_settings = app.save_settings
+app.load_settings = lambda: {"compact_mode": True}
+app.save_settings = lambda settings: saved_settings.append(settings)
+try:
+    settings_test_app.toggle_projections()
+finally:
+    app.load_settings = original_load_settings
+    app.save_settings = original_save_settings
+check("projection toggle becomes checked", settings_test_app.projections_item.state, 1)
+check(
+    "projection toggle preserves compact mode",
+    saved_settings,
+    [{"compact_mode": True, "use_projections": True}],
+)
+check("projection toggle refreshes the display", refreshes, [True])
+
+# ── 5. Status page indicator → icon ──────────────────────────────────────────
 
 print("\n── Status page indicators ──")
 for indicator, expected_icon in [
