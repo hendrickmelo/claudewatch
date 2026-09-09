@@ -9,7 +9,12 @@ from pathlib import Path
 
 sys.path.insert(0, "src")
 
-from claudewatch.app import format_countdown, format_window_duration
+from claudewatch.app import (
+    compact_severity,
+    format_countdown,
+    format_window_duration,
+    worst_severity,
+)
 from claudewatch.codex import find_codex_binary, normalize_rate_limits_response
 
 _failures = 0
@@ -86,6 +91,13 @@ check("120 minutes → 2-hour", format_window_duration(120), "2-hour")
 check("90 minutes → 90-minute", format_window_duration(90), "90-minute")
 check("missing duration → window", format_window_duration(None), "window")
 check("long reset countdown uses days", format_countdown(5 * 86400 + 3 * 3600), "5d03h")
+
+print("\n── Compact status severity ──")
+check("green remains green", compact_severity("🟢"), "green")
+check("yellow remains yellow", compact_severity("🟡"), "yellow")
+check("orange remains orange", compact_severity("🟠"), "orange")
+check("red remains red", compact_severity("🔴"), "red")
+check("worst limit wins", worst_severity("green", "red", "orange"), "red")
 
 print("\n── Codex binary discovery ──")
 with tempfile.TemporaryDirectory() as temp_dir:
