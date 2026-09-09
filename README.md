@@ -10,7 +10,7 @@ A macOS menubar app that shows Claude Code and Codex rate limit usage, plus acti
 
 **Menubar** (always visible):
 - Detailed mode: Claude (`C:`) and Codex (`X:`) usage, colors, and reset countdowns
-- Compact mode: one native SF Symbol colored for the worst current limit across Claude and Codex
+- Compact mode: one mostly solid status-color squircle for the worst current limit across Claude and Codex
 - Hover details covering both providers; click for the full dropdown
 - Claude system status alerts (from status.claude.com)
 
@@ -86,7 +86,7 @@ The app appears in your macOS menubar.
 
 ### Compact mode
 
-Choose **Compact Mode** in the dropdown to replace the text with one native macOS gauge symbol. The setting persists in `~/Library/Application Support/ClaudeWatch/settings.json`.
+Choose **Compact Mode** in the dropdown to replace the text with a 14 px filled macOS-style squircle. A subtle adaptive border keeps it visible against light and dark menu bars. The setting persists in `~/Library/Application Support/ClaudeWatch/settings.json`.
 
 Compact mode uses fixed current-usage thresholds—there is no burn-rate projection:
 
