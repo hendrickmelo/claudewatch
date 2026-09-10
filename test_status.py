@@ -272,5 +272,85 @@ check("same bad token → not recovered", run_recovered(DEFAULT_CREDS, "stale"),
 check("new token → recovered", run_recovered(DEFAULT_CREDS, "bad"), True)
 check("token appears after none → recovered", run_recovered(DEFAULT_CREDS, None), True)
 
+# ── 6. Transcript path cache ──────────────────────────────────────────────────
+
+print("\n── Transcript path cache (get_transcript_info) ──")
+
+import json
+import shutil
+import tempfile
+from pathlib import Path
+
+
+def _write_transcript(path: Path, model: str):
+    """Write a minimal transcript whose tail carries a usage record."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "type": "assistant",
+        "message": {"model": model, "usage": {"input_tokens": 1, "output_tokens": 2}},
+    }
+    path.write_text(json.dumps(record) + "\n")
+
+
+def _with_temp_projects(body):
+    """Run body(tmp) against a throwaway PROJECTS_DIR with clean caches."""
+    tmp = Path(tempfile.mkdtemp())
+    orig = app.PROJECTS_DIR
+    app.PROJECTS_DIR = tmp
+    app._transcript_cache.clear()
+    app._transcript_path_cache.clear()
+    try:
+        return body(tmp)
+    except Exception as e:  # report as a value so one bug can't abort the suite
+        return f"raised {type(e).__name__}"
+    finally:
+        app.PROJECTS_DIR = orig
+        app._transcript_cache.clear()
+        app._transcript_path_cache.clear()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def run_moved_transcript():
+    """A session that changes cwd (entering a worktree) relocates its transcript."""
+
+    def body(tmp):
+        sid = "sid-moved"
+        sessions = [{"sessionId": sid}]
+        old = tmp / "-Users-me-proj" / f"{sid}.jsonl"
+        _write_transcript(old, "model-a")
+
+        before = app.get_transcript_info(sessions).get(sid, {}).get("model")
+
+        new = tmp / "-Users-me-proj-worktrees-feature-x" / f"{sid}.jsonl"
+        new.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(old), str(new))
+
+        after = app.get_transcript_info(sessions).get(sid, {}).get("model")
+        return before, after
+
+    return _with_temp_projects(body)
+
+
+def run_vanished_transcript():
+    """A transcript that disappears must not cost every other session its update."""
+
+    def body(tmp):
+        good, bad = "sid-good", "sid-bad"
+        sessions = [{"sessionId": bad}, {"sessionId": good}]
+        _write_transcript(tmp / "-proj" / f"{good}.jsonl", "model-good")
+        bad_path = tmp / "-proj" / f"{bad}.jsonl"
+        _write_transcript(bad_path, "model-bad")
+
+        app.get_transcript_info(sessions)  # prime both path cache entries
+        bad_path.unlink()
+
+        return sorted(app.get_transcript_info(sessions))
+
+    return _with_temp_projects(body)
+
+
+check("transcript re-resolved after a worktree move", run_moved_transcript(), ("model-a", "model-a"))
+check("vanished transcript drops only its own session", run_vanished_transcript(), ["sid-good"])
+
 print()
 sys.exit(1 if _failures else 0)
