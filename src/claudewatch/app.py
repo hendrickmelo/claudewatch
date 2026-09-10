@@ -497,6 +497,18 @@ def load_json(path: Path) -> dict | None:
         return None
 
 
+def safe_mtime(path: Path) -> float | None:
+    """Return a file's mtime, or None if it is gone.
+
+    Claude Code rewrites and prunes these files while we walk them, so a path
+    that a glob just returned can vanish before the stat lands.
+    """
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
 def get_active_sessions() -> list[dict]:
     """Get all active Claude Code sessions (alive PIDs)."""
     sessions = []
@@ -573,8 +585,8 @@ def get_session_statuses(sessions: list[dict], window_start: float) -> list[dict
         if session_id not in session_ids:
             continue
 
-        mtime = f.stat().st_mtime
-        if mtime < window_start:
+        mtime = safe_mtime(f)
+        if mtime is None or mtime < window_start:
             continue
 
         data = load_json(f)
@@ -590,24 +602,44 @@ _transcript_cache: dict[str, dict] = {}  # sid -> {_transcript_mtime, model, ...
 _transcript_path_cache: dict[str, Path | None] = {}  # sid -> Path
 
 
+def _resolve_transcript(session_id: str) -> tuple[Path, float] | None:
+    """Return a session's transcript and its mtime, re-resolving a stale path.
+
+    The path lookup is cached because the glob is expensive, but a session that
+    changes cwd — entering a worktree, say — makes Claude Code relocate its
+    transcript into a different project dir, leaving the cached path pointing at
+    a file that is no longer there. Drop the cache entry and look again once.
+    Returns None if the transcript cannot be found at all.
+    """
+    for _ in range(2):
+        if session_id not in _transcript_path_cache:
+            _transcript_path_cache[session_id] = find_transcript(session_id)
+        transcript = _transcript_path_cache[session_id]
+        if not transcript:
+            return None
+        mtime = safe_mtime(transcript)
+        if mtime is not None:
+            return transcript, mtime
+        del _transcript_path_cache[session_id]
+    return None
+
+
 def get_transcript_info(sessions: list[dict]) -> dict[str, dict]:
     """Get transcript-based info for sessions (mtime, model, tokens).
 
-    Caches results and only re-reads files when mtime changes.
+    Caches results and only re-reads files when mtime changes. A session whose
+    transcript cannot be read is skipped, so one unreadable file costs that
+    session's data rather than the whole refresh.
     Returns a dict keyed by session ID.
     """
     result = {}
     for session in sessions:
         sid = session.get("sessionId", "")
 
-        # Cache the transcript path lookup (expensive glob)
-        if sid not in _transcript_path_cache:
-            _transcript_path_cache[sid] = find_transcript(sid)
-        transcript = _transcript_path_cache[sid]
-        if not transcript:
+        resolved = _resolve_transcript(sid)
+        if not resolved:
             continue
-
-        mtime = transcript.stat().st_mtime
+        transcript, mtime = resolved
 
         # Only re-read if file changed since last read
         cached = _transcript_cache.get(sid)
@@ -785,8 +817,9 @@ class ClaudeWatchApp(rumps.App):
         if STATUS_DIR.exists():
             for f in STATUS_DIR.glob("*.json"):
                 data = load_json(f)
-                if data:
-                    data["_mtime"] = f.stat().st_mtime
+                mtime = safe_mtime(f)
+                if data and mtime is not None:
+                    data["_mtime"] = mtime
                     data["_session_id"] = f.stem
                     all_statuses.append(data)
 
@@ -794,8 +827,9 @@ class ClaudeWatchApp(rumps.App):
         legacy = CLAUDE_DIR / "context-status.json"
         if legacy.exists() and not all_statuses:
             data = load_json(legacy)
-            if data:
-                data["_mtime"] = legacy.stat().st_mtime
+            mtime = safe_mtime(legacy)
+            if data and mtime is not None:
+                data["_mtime"] = mtime
                 data["_session_id"] = data.get("session_id", "unknown")
                 all_statuses.append(data)
 
