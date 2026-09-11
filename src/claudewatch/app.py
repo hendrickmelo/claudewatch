@@ -6,6 +6,8 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
+import traceback
 import urllib.error
 import urllib.request
 import webbrowser
@@ -23,9 +25,11 @@ POLL_INTERVAL = 5  # seconds
 API_POLL_INTERVAL = 60  # seconds
 API_STALE_THRESHOLD = 300  # only poll API if no status update in 5 minutes
 KEYCHAIN_WATCH_INTERVAL = 30  # needs-login: how often to check keychain for a new login
+REFRESH_FAILURE_THRESHOLD = 3  # consecutive failed refreshes before the menubar says so
 
 LOGIN_TITLE = "🔑 login"
 LOGIN_STATUS_LINE = "🔑 Claude login expired — run claude and log in again"
+STALLED_TITLE = "🛑 --"
 API_LOG = Path.home() / ".claude" / "claudewatch-api.log"
 
 STATUS_PAGE_URL = "https://status.claude.com/api/v2/summary.json"
@@ -740,6 +744,10 @@ class ClaudeWatchApp(rumps.App):
         self._needs_login_token: str | None = None  # access token that failed, if any
         self._last_keychain_check = 0.0
         self._last_status_poll = 0.0
+        self._refresh_failures = 0  # consecutive refreshes that raised
+        self._refresh_error = ""  # type+message of the current failure, for dedupe
+        self._stalled_since = 0.0  # when the current failure streak began
+        self._stalled_logged = False  # STALLED already written for this streak
         self._claude_status: dict = {
             "indicator": "none",
             "description": "",
@@ -808,6 +816,65 @@ class ClaudeWatchApp(rumps.App):
             self._API_DATA_CACHE.write_text(json.dumps(data))
 
     def refresh(self, sender=None):
+        """Run a refresh, keeping the menubar honest if it fails.
+
+        An exception here used to escape into rumps, which logged it and moved
+        on — leaving the menubar frozen on its last good values with nothing to
+        say it had stopped updating.
+        """
+        try:
+            self._refresh_once(sender)
+        except Exception as exc:
+            self._record_refresh_failure(exc)
+        else:
+            self._record_refresh_success()
+
+    def _record_refresh_failure(self, exc: Exception):
+        """Count a failed refresh, log it once per streak, and show it if it sticks."""
+        now = datetime.now(timezone.utc).timestamp()
+        error = f"{type(exc).__name__}: {exc}"
+
+        if self._refresh_failures == 0:
+            self._stalled_since = now
+
+        # Log the traceback once per streak, and again if the error itself changes:
+        # a second bug hiding behind the first would otherwise never be seen.
+        if error != self._refresh_error:
+            self._refresh_error = error
+            self._stalled_logged = False
+            print(traceback.format_exc(), file=sys.stderr, flush=True)
+
+        self._refresh_failures += 1
+        if self._refresh_failures < REFRESH_FAILURE_THRESHOLD:
+            return  # a blip that clears on the next tick never reaches the screen
+
+        if not self._stalled_logged:
+            self._stalled_logged = True
+            _log_api(f"STALLED  refresh failing after {self._refresh_failures}x: {error}")
+
+        self._render_stalled(now)
+
+    def _record_refresh_success(self):
+        """Clear the failure streak, noting recovery if the menubar was showing it."""
+        if self._refresh_failures >= REFRESH_FAILURE_THRESHOLD:
+            _log_api(f"RECOVERED  refresh healthy after {self._refresh_failures} failures")
+        self._refresh_failures = 0
+        self._refresh_error = ""
+        self._stalled_since = 0.0
+        self._stalled_logged = False
+
+    def _render_stalled(self, now: float):
+        """Take over the title and freshness line while refreshes are failing.
+
+        Everything the normal path would draw is computed inside the refresh
+        that just died, so the numbers are frozen artifacts rather than current
+        readings. Blank them instead of showing values that look live.
+        """
+        self.title = LOGIN_TITLE if self._needs_login else STALLED_TITLE
+        stalled_for = format_time_ago(now - self._stalled_since)
+        self.last_updated.title = f"⚠️ Updates stopped {stalled_for} — {self._refresh_error}"
+
+    def _refresh_once(self, sender=None):
         """Poll status files and update the menubar."""
         now = datetime.now(timezone.utc).timestamp()
 
