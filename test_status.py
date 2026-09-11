@@ -352,5 +352,94 @@ def run_vanished_transcript():
 check("transcript re-resolved after a worktree move", run_moved_transcript(), ("model-a", "model-a"))
 check("vanished transcript drops only its own session", run_vanished_transcript(), ["sid-good"])
 
+# ── 7. Refresh failure visibility ─────────────────────────────────────────────
+
+print("\n── Refresh failure visibility (refresh) ──")
+
+import contextlib
+
+HEALTHY_TITLE = "🟢11% ↻4h19m"
+THRESHOLD = app.REFRESH_FAILURE_THRESHOLD
+
+
+def _thrower(exc):
+    """A _refresh_once stand-in that always raises."""
+
+    def raise_it(sender=None):
+        raise exc
+
+    return raise_it
+
+
+def _drive(failures: list, healthy_after: bool = False):
+    """Run an app through a failure sequence, capturing stderr and log lines.
+
+    Returns (titles_after_each_failure, last_updated, log_lines, traceback_count).
+    Never calls the real _refresh_once, so no network or live data is touched.
+    """
+    instance = app.ClaudeWatchApp()
+    instance.title = HEALTHY_TITLE
+    instance.last_updated.title = "Last active: just now"
+
+    log_lines = []
+    orig_log = app._log_api
+    app._log_api = log_lines.append
+    captured = io.StringIO()
+    try:
+        titles = []
+        with contextlib.redirect_stderr(captured):
+            for exc in failures:
+                instance._refresh_once = _thrower(exc)
+                instance.refresh()
+                titles.append(instance.title)
+            if healthy_after:
+                instance._refresh_once = lambda sender=None: None
+                instance.refresh()
+    finally:
+        app._log_api = orig_log
+
+    return (
+        titles,
+        instance.last_updated.title,
+        log_lines,
+        captured.getvalue().count("Traceback (most recent call last)"),
+        instance,
+    )
+
+
+gone = FileNotFoundError(2, "No such file or directory", "/gone/x.jsonl")
+
+titles, last_updated, logs, tb_count, inst = _drive([gone] * THRESHOLD)
+
+check("failures below threshold leave the title alone", titles[:-1], [HEALTHY_TITLE] * (THRESHOLD - 1))
+check("threshold trips the stalled title", titles[-1], app.STALLED_TITLE)
+check("stalled line names the error", "FileNotFoundError" in last_updated, True)
+check("stalled line says when it stopped", "Updates stopped" in last_updated, True)
+check("repeated identical errors log one traceback", tb_count, 1)
+check("tripping logs STALLED once", sum("STALLED" in line for line in logs), 1)
+
+# A second bug hiding behind the first must not be swallowed by the dedupe.
+_, _, logs2, tb_count2, _ = _drive([gone] * THRESHOLD + [ValueError("second bug")])
+
+check("a new error mid-streak logs another traceback", tb_count2, 2)
+check("a new error mid-streak logs STALLED again", sum("STALLED" in line for line in logs2), 2)
+
+# Recovery clears the streak and reports it.
+_, _, logs3, _, recovered = _drive([gone] * THRESHOLD, healthy_after=True)
+
+check("recovery resets the failure count", recovered._refresh_failures, 0)
+check("recovery clears the recorded error", recovered._refresh_error, "")
+check("recovery logs RECOVERED", sum("RECOVERED" in line for line in logs3), 1)
+
+# Login is the one state that outranks a stalled refresh.
+login_app = app.ClaudeWatchApp()
+login_app._needs_login = True
+login_app._refresh_once = _thrower(gone)
+with contextlib.redirect_stderr(io.StringIO()):
+    for _ in range(THRESHOLD):
+        login_app.refresh()
+
+check("login outranks the stalled title", login_app.title, app.LOGIN_TITLE)
+
 print()
 sys.exit(1 if _failures else 0)
