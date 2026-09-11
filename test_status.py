@@ -441,5 +441,138 @@ with contextlib.redirect_stderr(io.StringIO()):
 
 check("login outranks the stalled title", login_app.title, app.LOGIN_TITLE)
 
+# ── 8. Per-model weekly limits ────────────────────────────────────────────────
+
+print("\n── Per-model weekly limits (parse_per_model_limits) ──")
+
+
+def _scoped(name, percent, resets="2026-09-17T04:59:59+00:00"):
+    model = None if name is None else {"display_name": name, "id": None}
+    return {
+        "kind": "weekly_scoped",
+        "group": "weekly",
+        "percent": percent,
+        "resets_at": resets,
+        "scope": {"model": model} if model is not None else {},
+        "is_active": True,
+        "severity": "normal",
+    }
+
+
+# Shape captured verbatim from a real /api/oauth/usage response.
+REAL_PAYLOAD = {
+    "limits": [
+        {
+            "kind": "session",
+            "group": "session",
+            "percent": 4,
+            "resets_at": "2026-09-11T17:30:00+00:00",
+            "scope": None,
+            "is_active": False,
+            "severity": "normal",
+        },
+        {
+            "kind": "weekly_all",
+            "group": "weekly",
+            "percent": 29,
+            "resets_at": "2026-09-17T05:00:00+00:00",
+            "scope": None,
+            "is_active": False,
+            "severity": "normal",
+        },
+        _scoped("Fable", 37),
+    ]
+}
+
+
+def names_and_pcts(payload):
+    return [(e["name"], e["used_percentage"]) for e in app.parse_per_model_limits(payload)]
+
+
+check("real payload yields only the scoped model", names_and_pcts(REAL_PAYLOAD), [("Fable", 37)])
+check(
+    "scoped entries sort tightest first",
+    names_and_pcts({"limits": [_scoped("Sonnet", 12), _scoped("Fable", 37), _scoped("Opus", 25)]}),
+    [("Fable", 37), ("Opus", 25), ("Sonnet", 12)],
+)
+check("unnamed scoped entry is dropped", names_and_pcts({"limits": [_scoped(None, 50)]}), [])
+check("missing limits key yields nothing", names_and_pcts({}), [])
+check("null limits yields nothing", names_and_pcts({"limits": None}), [])
+check(
+    "resets_at is parsed to a timestamp",
+    app.parse_per_model_limits(REAL_PAYLOAD)[0]["resets_at"] > 0,
+    True,
+)
+
+print("\n── Per-model rows in the dropdown ──")
+
+
+def render_rows(per_model):
+    """Drive _update_rate_limits headlessly and return the model row titles."""
+    instance = app.ClaudeWatchApp()
+    now = time.time()
+    latest = {
+        "rate_limits": {
+            "five_hour": {"used_percentage": 4, "resets_at": now + 3600},
+            "seven_day": {"used_percentage": 29, "resets_at": now + 5 * 86400},
+        },
+        "per_model": per_model,
+        "_mtime": now,
+    }
+    instance._update_rate_limits(latest, now, now)
+    return [instance.menu[k].title for k in instance._model_keys]
+
+
+rows = render_rows([{"name": "Fable", "used_percentage": 37, "resets_at": time.time() + 5 * 86400}])
+
+check("one scoped model renders one row", len(rows), 1)
+check("row names the model and percentage", "Fable" in rows[0] and "37%" in rows[0], True)
+check("a lone row closes the tree", rows[0].strip().startswith("└"), True)
+check("no scoped models renders no rows", render_rows([]), [])
+
+multi = render_rows(
+    [
+        {"name": "Fable", "used_percentage": 37, "resets_at": time.time() + 5 * 86400},
+        {"name": "Opus", "used_percentage": 12, "resets_at": time.time() + 5 * 86400},
+    ]
+)
+
+check("all but the last row branch", multi[0].strip().startswith("├"), True)
+check("the last row closes the tree", multi[-1].strip().startswith("└"), True)
+
+
+def rows_survive_rerender():
+    """Rebuilding on each refresh must not duplicate or orphan rows."""
+    instance = app.ClaudeWatchApp()
+    now = time.time()
+    latest = {
+        "rate_limits": {
+            "five_hour": {"used_percentage": 4, "resets_at": now + 3600},
+            "seven_day": {"used_percentage": 29, "resets_at": now + 5 * 86400},
+        },
+        "per_model": [{"name": "Fable", "used_percentage": 37, "resets_at": now + 5 * 86400}],
+        "_mtime": now,
+    }
+    for _ in range(3):
+        instance._update_rate_limits(latest, now, now)
+    return len(instance._model_keys)
+
+
+check("re-rendering does not duplicate rows", rows_survive_rerender(), 1)
+
+
+def null_rate_limits_survives():
+    """A status file with rate_limits: null must not take down the refresh."""
+    instance = app.ClaudeWatchApp()
+    now = time.time()
+    try:
+        instance._update_rate_limits({"rate_limits": None, "_mtime": now}, now, now)
+    except Exception as e:
+        return f"raised {type(e).__name__}"
+    return "survived"
+
+
+check("null rate_limits does not raise", null_rate_limits_survives(), "survived")
+
 print()
 sys.exit(1 if _failures else 0)

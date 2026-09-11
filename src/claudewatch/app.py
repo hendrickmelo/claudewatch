@@ -183,6 +183,44 @@ def _refresh_oauth_token(creds: dict) -> str | None:
         return None
 
 
+def _parse_iso_ts(iso_str: str) -> int:
+    """Convert an ISO-8601 timestamp to epoch seconds, or 0 if unparseable."""
+    try:
+        return int(datetime.fromisoformat(iso_str).timestamp())
+    except (ValueError, TypeError):
+        return 0
+
+
+def parse_per_model_limits(data: dict) -> list[dict]:
+    """Pull the per-model weekly limits out of a usage API response.
+
+    The account-wide weekly figure can sit well below the limit that actually
+    binds: a model-scoped limit is reported separately and is often the higher
+    of the two. The API carries these as `limits` entries of kind
+    "weekly_scoped", each naming the model it applies to.
+
+    Entries without a usable display name are dropped — a row we cannot label
+    tells the reader nothing. Returns the tightest constraint first.
+    """
+    entries = []
+    for limit in data.get("limits") or []:
+        if limit.get("kind") != "weekly_scoped":
+            continue
+        model = (limit.get("scope") or {}).get("model") or {}
+        name = model.get("display_name")
+        if not name:
+            continue
+        entries.append(
+            {
+                "name": name,
+                "used_percentage": limit.get("percent", 0),
+                "resets_at": _parse_iso_ts(limit.get("resets_at", "")),
+            }
+        )
+    entries.sort(key=lambda e: e["used_percentage"], reverse=True)
+    return entries
+
+
 def _call_usage_api(token: str) -> dict | str | None:
     """Call the usage API with a given token. Returns data dict, "rate_limited", or None."""
     _log_api("GET    /api/oauth/usage")
@@ -197,13 +235,6 @@ def _call_usage_api(token: str) -> dict | str | None:
         resp = urllib.request.urlopen(req, timeout=10)
         data = json.loads(resp.read())
 
-        def parse_reset(iso_str: str) -> int:
-            try:
-                dt = datetime.fromisoformat(iso_str)
-                return int(dt.timestamp())
-            except (ValueError, TypeError):
-                return 0
-
         five_hour = data.get("five_hour", {})
         seven_day = data.get("seven_day", {})
         used_5h = int(five_hour.get("utilization", 0))
@@ -215,13 +246,14 @@ def _call_usage_api(token: str) -> dict | str | None:
             "rate_limits": {
                 "five_hour": {
                     "used_percentage": used_5h,
-                    "resets_at": parse_reset(five_hour.get("resets_at", "")),
+                    "resets_at": _parse_iso_ts(five_hour.get("resets_at", "")),
                 },
                 "seven_day": {
                     "used_percentage": used_7d,
-                    "resets_at": parse_reset(seven_day.get("resets_at", "")),
+                    "resets_at": _parse_iso_ts(seven_day.get("resets_at", "")),
                 },
             },
+            "per_model": parse_per_model_limits(data),
             "_source": "oauth_api",
         }
     except urllib.error.HTTPError as e:
@@ -761,6 +793,11 @@ class ClaudeWatchApp(rumps.App):
         self.rate_7d = rumps.MenuItem(
             "7-day: --", callback=lambda _: webbrowser.open("https://claude.ai/settings/usage")
         )
+        # A menu item is keyed by its title at insertion time, and these titles
+        # are rewritten on every refresh — so keep the original to anchor the
+        # per-model rows underneath.
+        self._rate_7d_key = "7-day: --"
+        self._model_keys: list[str] = []
         self.last_updated = rumps.MenuItem("Last updated: --", callback=None)
         self.status_item = rumps.MenuItem(
             "✅ All Systems Operational",
@@ -1000,13 +1037,16 @@ class ClaudeWatchApp(rumps.App):
             self.rate_5h.title = "⚪ 5-hour: no data"
             self.rate_7d.title = "⚪ 7-day: no data"
             self.last_updated.title = "No status data yet"
+            self._update_model_rows([], is_stale=False, now=now)
             if self._needs_login:
                 self.status_item.title = LOGIN_STATUS_LINE
             return
 
-        rl = latest.get("rate_limits", {})
-        five_hour = rl.get("five_hour", {})
-        seven_day = rl.get("seven_day", {})
+        # Status files written by newer Claude Code versions carry an explicit
+        # null here, so a plain default would hand back None.
+        rl = latest.get("rate_limits") or {}
+        five_hour = rl.get("five_hour") or {}
+        seven_day = rl.get("seven_day") or {}
 
         used_5h = five_hour.get("used_percentage", 0)
         resets_at_5h = five_hour.get("resets_at", 0)
@@ -1050,6 +1090,7 @@ class ClaudeWatchApp(rumps.App):
         self.rate_7d.title = (
             f"{icon_7d} 7-day:   {format_pct(used_7d)}% used  (resets {reset_time_7d})"
         )
+        self._update_model_rows(latest.get("per_model") or [], is_stale, now)
 
         # Tooltip: show last successful fetch time
         if self._needs_login:
@@ -1090,6 +1131,39 @@ class ClaudeWatchApp(rumps.App):
         # "Last updated" uses the most recent activity (status OR transcript)
         age = now - latest_activity if latest_activity > 0 else now - latest["_mtime"]
         self.last_updated.title = f"Last active: {format_time_ago(age)}"
+
+    def _update_model_rows(self, models: list[dict], is_stale: bool, now: float):
+        """Rebuild the per-model weekly rows sitting beneath the 7-day figure.
+
+        Which models carry a limit of their own changes from day to day, so the
+        rows are torn down and rebuilt rather than updated in place.
+        """
+        for key in list(self._model_keys):
+            with contextlib.suppress(KeyError):
+                del self.menu[key]
+        self._model_keys.clear()
+
+        for index, model in enumerate(models):
+            pct = model.get("used_percentage", 0)
+            icon = (
+                "⚪"
+                if is_stale
+                else status_icon(pct, model.get("resets_at", 0), now, window_hours=7 * 24)
+            )
+            connector = "└" if index == len(models) - 1 else "├"
+            self._model_keys.append(
+                f" {connector} {icon} {model['name']}:  {format_pct(pct)}% used"
+            )
+
+        # Each insert lands directly beneath the anchor, so adding them back to
+        # front leaves the tightest limit sitting on top.
+        for title in reversed(self._model_keys):
+            # Clickable like the rate rows above: a callback of None greys the
+            # item out, and these carry the tightest number in the menu.
+            row = rumps.MenuItem(
+                title, callback=lambda _: webbrowser.open("https://claude.ai/settings/usage")
+            )
+            self.menu.insert_after(self._rate_7d_key, row)
 
     def _update_sessions(
         self,
