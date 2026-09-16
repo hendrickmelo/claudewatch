@@ -4,11 +4,17 @@
 Run this to verify the icon/title logic works before a real incident happens.
 """
 
+import contextlib
 import io
+import json
+import math
+import shutil
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 sys.path.insert(0, "src")
 
@@ -16,6 +22,8 @@ from AppKit import NSBitmapImageRep
 
 import claudewatch.app as app
 from claudewatch.app import (
+    COMPACT_ICON_BORDER_WIDTH,
+    COMPACT_ICON_CORNER_RADIUS,
     COMPACT_ICON_SIZE,
     STATUS_ICONS,
     ClaudeWatchApp,
@@ -128,6 +136,15 @@ check("projection note is hidden when disabled", projection_note(50, now, now, 5
 
 print("\n── Solid compact squircle ──")
 icon_maker = ClaudeWatchApp.__new__(ClaudeWatchApp)
+
+# A filled rounded rect covers side² − (4 − π)r² of its bounding box, and the
+# half-transparent border does not clear the alpha cutoff below. At the current
+# constants that ceiling is ~82%, so a fixed 85% could never pass. Compare
+# against the ceiling instead: under it the squircle is hollow or clipped, well
+# over it the corners have stopped being round.
+_side = COMPACT_ICON_SIZE - COMPACT_ICON_BORDER_WIDTH
+FILL_CEILING = (_side**2 - (4 - math.pi) * COMPACT_ICON_CORNER_RADIUS**2) / COMPACT_ICON_SIZE**2
+
 for severity in ("green", "yellow", "orange", "red"):
     image = icon_maker._make_compact_icon(severity)
     rep = NSBitmapImageRep.imageRepWithData_(image.TIFFRepresentation())
@@ -140,7 +157,9 @@ for severity in ("green", "yellow", "orange", "red"):
     )
     check(f"{severity} icon is {COMPACT_ICON_SIZE}×{COMPACT_ICON_SIZE}", image.size().width, 14)
     check(f"{severity} icon preserves color", image.isTemplate(), False)
-    check(f"{severity} icon is mostly solid", filled_pixels / pixel_count >= 0.85, True)
+    fill_ratio = filled_pixels / pixel_count
+    check(f"{severity} icon fills its squircle", fill_ratio >= FILL_CEILING * 0.97, True)
+    check(f"{severity} icon keeps its round corners", fill_ratio <= FILL_CEILING * 1.05, True)
 
 # Projection and compact mode are independent settings, and toggling projection
 # must preserve other keys already stored in the settings file.
@@ -347,11 +366,6 @@ check("token appears after none → recovered", run_recovered(DEFAULT_CREDS, Non
 
 print("\n── Transcript path cache (get_transcript_info) ──")
 
-import json
-import shutil
-import tempfile
-from pathlib import Path
-
 
 def _write_transcript(path: Path, model: str):
     """Write a minimal transcript whose tail carries a usage record."""
@@ -420,14 +434,14 @@ def run_vanished_transcript():
     return _with_temp_projects(body)
 
 
-check("transcript re-resolved after a worktree move", run_moved_transcript(), ("model-a", "model-a"))
+check(
+    "transcript re-resolved after a worktree move", run_moved_transcript(), ("model-a", "model-a")
+)
 check("vanished transcript drops only its own session", run_vanished_transcript(), ["sid-good"])
 
 # ── 7. Refresh failure visibility ─────────────────────────────────────────────
 
 print("\n── Refresh failure visibility (refresh) ──")
-
-import contextlib
 
 HEALTHY_TITLE = "🟢11% ↻4h19m"
 THRESHOLD = app.REFRESH_FAILURE_THRESHOLD
@@ -482,7 +496,9 @@ gone = FileNotFoundError(2, "No such file or directory", "/gone/x.jsonl")
 
 titles, last_updated, logs, tb_count, inst = _drive([gone] * THRESHOLD)
 
-check("failures below threshold leave the title alone", titles[:-1], [HEALTHY_TITLE] * (THRESHOLD - 1))
+check(
+    "failures below threshold leave the title alone", titles[:-1], [HEALTHY_TITLE] * (THRESHOLD - 1)
+)
 check("threshold trips the stalled title", titles[-1], app.STALLED_TITLE)
 check("stalled line names the error", "FileNotFoundError" in last_updated, True)
 check("stalled line says when it stopped", "Updates stopped" in last_updated, True)
