@@ -4,7 +4,7 @@
 
 A macOS menubar app that shows Claude Code and Codex rate limit usage, plus active Claude Code sessions, at a glance.
 
-![menubar example](https://img.shields.io/badge/menubar-C%3A🟢64%25_↻2h34m__X%3A🟢31%25_↻5d-brightgreen)
+![menubar example](https://img.shields.io/badge/menubar-C%3A🟢64%25_↻2d04h__X%3A🟢31%25_↻5d-brightgreen)
 
 ## What it shows
 
@@ -15,7 +15,7 @@ A macOS menubar app that shows Claude Code and Codex rate limit usage, plus acti
 - Claude system status alerts (from status.claude.com)
 
 **Dropdown** (click to expand):
-- Claude 5-hour and 7-day rate limit details
+- Claude weekly rate limit details, account-wide and per model
 - Every Codex limit bucket and rolling window exposed by the installed Codex app-server
 - Active Claude sessions grouped by project with T3 thread titles
 - Per-session details (model, context, cost, tokens)
@@ -121,7 +121,7 @@ Crashes are restarted automatically; quitting from the menubar is not. Logs go t
 
 ClaudeWatch pulls data from multiple sources:
 
-1. **Claude OAuth usage API** — polled every minute for account-wide limits (5-hour and 7-day)
+1. **Claude OAuth usage API** — polled every minute for account-wide and per-model weekly rate limits
 2. **Codex app-server** — starts the installed Codex CLI briefly and calls `account/rateLimits/read` for every available limit bucket
 3. **Statusline hook** — writes per-session status files on each Claude Code interaction (context %, cost, lines changed)
 4. **Transcript files** — reads `~/.claude/projects/` JSONL files for session activity and token counts
