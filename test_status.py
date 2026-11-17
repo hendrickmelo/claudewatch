@@ -45,15 +45,15 @@ check("empty string ignored",        _is_real_error(""), False)
 print("\n── Burn-rate color logic (status_icon) ──")
 import time
 now = time.time()
-resets_in_5h = now + 5 * 3600  # window just started
+resets_in_week = now + 7 * 86400  # weekly window just started
 
-# At 10% used with 5h remaining → projected 10% → green
-check("10% used, full window → green",  status_icon(10, resets_in_5h, now), "\U0001f7e2")
-# At 20% with 5h remaining → projected 20% → green
-check("20% used, full window → green",  status_icon(20, resets_in_5h, now), "\U0001f7e2")
+# At 10% used with the full week remaining → projected 10% → green
+check("10% used, full window → green",  status_icon(10, resets_in_week, now), "\U0001f7e2")
+# At 20% with the full week remaining → projected 20% → green
+check("20% used, full window → green",  status_icon(20, resets_in_week, now), "\U0001f7e2")
 
-# Simulate 2.5h elapsed, 2.5h remaining
-resets_midpoint = now + 2.5 * 3600
+# Simulate 3.5d elapsed, 3.5d remaining
+resets_midpoint = now + 3.5 * 86400
 # 50% used halfway → projected 100% → orange
 check("50% used, halfway → orange", status_icon(50, resets_midpoint, now), "\U0001f7e0")
 # 30% used halfway → projected 60% → green
@@ -149,7 +149,7 @@ print("\n── OAuth refresh on 401 (fetch_oauth_usage) ──")
 import claudewatch.app as app
 
 GOOD = {
-    "rate_limits": {"five_hour": {"used_percentage": 12, "resets_at": 0}},
+    "rate_limits": {"seven_day": {"used_percentage": 12, "resets_at": 0}},
     "_source": "oauth_api",
 }
 
@@ -513,7 +513,6 @@ def render_rows(per_model):
     now = time.time()
     latest = {
         "rate_limits": {
-            "five_hour": {"used_percentage": 4, "resets_at": now + 3600},
             "seven_day": {"used_percentage": 29, "resets_at": now + 5 * 86400},
         },
         "per_model": per_model,
@@ -547,7 +546,6 @@ def rows_survive_rerender():
     now = time.time()
     latest = {
         "rate_limits": {
-            "five_hour": {"used_percentage": 4, "resets_at": now + 3600},
             "seven_day": {"used_percentage": 29, "resets_at": now + 5 * 86400},
         },
         "per_model": [{"name": "Fable", "used_percentage": 37, "resets_at": now + 5 * 86400}],
@@ -573,6 +571,79 @@ def null_rate_limits_survives():
 
 
 check("null rate_limits does not raise", null_rate_limits_survives(), "survived")
+
+# ── 9. Weekly-only usage API (no 5-hour window) ──────────────────────────────
+
+print("\n── Weekly-only usage API ──")
+
+check("countdown over a day shows days", format_countdown(2 * 86400 + 4 * 3600 + 59), "2d04h")
+check("countdown under a day shows hours", format_countdown(3 * 3600 + 5 * 60), "3h05m")
+
+# Shape captured from a real /api/oauth/usage response after the 5-hour
+# window was retired: five_hour is an explicit null.
+WEEKLY_ONLY_PAYLOAD = {
+    "five_hour": None,
+    "seven_day": {"utilization": 16.0, "resets_at": "2026-11-05T05:00:00.453738+00:00"},
+    "limits": [
+        {
+            "kind": "weekly_all",
+            "group": "weekly",
+            "percent": 16,
+            "resets_at": "2026-11-05T05:00:00.453738+00:00",
+            "scope": None,
+        },
+        _scoped("Fable", 24, "2026-11-05T05:00:00.454010+00:00"),
+    ],
+}
+
+
+class _FakeResponse:
+    def __init__(self, payload):
+        self._body = json.dumps(payload).encode()
+
+    def read(self):
+        return self._body
+
+
+def call_weekly_only():
+    original = app.urllib.request.urlopen
+    app.urllib.request.urlopen = lambda *a, **k: _FakeResponse(WEEKLY_ONLY_PAYLOAD)
+    try:
+        return app._call_usage_api("token")
+    finally:
+        app.urllib.request.urlopen = original
+
+
+weekly = call_weekly_only()
+check("null five_hour parses", isinstance(weekly, dict), True)
+check(
+    "weekly usage is carried",
+    weekly["rate_limits"]["seven_day"]["used_percentage"] if isinstance(weekly, dict) else None,
+    16,
+)
+check("no five_hour key is emitted", "five_hour" in weekly.get("rate_limits", {}), False)
+
+
+def title_for(seven_day_pct, per_model):
+    instance = app.ClaudeWatchApp()
+    now = time.time()
+    latest = {
+        "rate_limits": {
+            "seven_day": {"used_percentage": seven_day_pct, "resets_at": now + 2 * 86400},
+        },
+        "per_model": per_model,
+        "_mtime": now,
+    }
+    instance._update_rate_limits(latest, now, now)
+    return instance.title
+
+
+binding_title = title_for(
+    16, [{"name": "Fable", "used_percentage": 24, "resets_at": time.time() + 2 * 86400}]
+)
+check("title shows the tightest weekly limit", "24%" in binding_title, True)
+check("title counts down in days", "\u21bb1d23h" in binding_title, True)
+check("title falls back to the account-wide limit", "16%" in title_for(16, []), True)
 
 print()
 sys.exit(1 if _failures else 0)
