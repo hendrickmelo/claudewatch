@@ -26,7 +26,7 @@ if [ "$1" = "--chain" ] && [ -n "$2" ]; then
 else
     # Default minimal statusline output: context% and rate limit
     _cw_ctx_pct=$(echo "$input" | jq -r '.context_window.used_percentage // empty' 2>/dev/null)
-    _cw_rl_pct=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty' 2>/dev/null)
+    _cw_rl_pct=$(echo "$input" | jq -r '.rate_limits.seven_day.used_percentage // empty' 2>/dev/null)
     if [ -n "$_cw_ctx_pct" ]; then
         printf "(%s%%) " "$_cw_ctx_pct"
     fi

@@ -4,17 +4,17 @@
 
 A macOS menubar app that shows your Claude Code rate limit usage and active sessions at a glance.
 
-![menubar example](https://img.shields.io/badge/menubar-🟢64%25_↻2h34m-brightgreen)
+![menubar example](https://img.shields.io/badge/menubar-🟢64%25_↻2d04h-brightgreen)
 
 ## What it shows
 
 **Menubar** (always visible):
 - Rate limit usage with smart burn-rate color indicator
-- Countdown to 5-hour window reset
+- Countdown to the weekly limit reset
 - Claude system status alerts (from status.claude.com)
 
 **Dropdown** (click to expand):
-- 5-hour and 7-day rate limit details
+- Weekly rate limit details, account-wide and per model
 - Active sessions grouped by project with T3 thread titles
 - Per-session details (model, context, cost, tokens)
 - Live Claude system status (clickable → status.claude.com)
@@ -97,7 +97,7 @@ Crashes are restarted automatically; quitting from the menubar is not. Logs go t
 
 ClaudeWatch pulls data from multiple sources:
 
-1. **OAuth usage API** — polled every minute for account-wide rate limits (5-hour and 7-day)
+1. **OAuth usage API** — polled every minute for account-wide and per-model weekly rate limits
 2. **Statusline hook** — writes per-session status files on each Claude Code interaction (context %, cost, lines changed)
 3. **Transcript files** — reads `~/.claude/projects/` JSONL files for session activity and token counts
 4. **T3 SQLite database** — reads `~/.t3/userdata/state.sqlite` for thread titles and session mapping

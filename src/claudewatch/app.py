@@ -24,6 +24,7 @@ PROJECTS_DIR = CLAUDE_DIR / "projects"
 POLL_INTERVAL = 5  # seconds
 API_POLL_INTERVAL = 60  # seconds
 API_STALE_THRESHOLD = 300  # only poll API if no status update in 5 minutes
+ACTIVE_SESSION_WINDOW = 5 * 3600  # seconds; activity this recent marks a session active
 KEYCHAIN_WATCH_INTERVAL = 30  # needs-login: how often to check keychain for a new login
 REFRESH_FAILURE_THRESHOLD = 3  # consecutive failed refreshes before the menubar says so
 
@@ -235,19 +236,15 @@ def _call_usage_api(token: str) -> dict | str | None:
         resp = urllib.request.urlopen(req, timeout=10)
         data = json.loads(resp.read())
 
-        five_hour = data.get("five_hour", {})
-        seven_day = data.get("seven_day", {})
-        used_5h = int(five_hour.get("utilization", 0))
-        used_7d = int(seven_day.get("utilization", 0))
+        # Absent limits come back as an explicit null, so a plain default
+        # would hand back None.
+        seven_day = data.get("seven_day") or {}
+        used_7d = int(seven_day.get("utilization") or 0)
 
-        _log_api(f"OK     5h={used_5h}%  7d={used_7d}%")
+        _log_api(f"OK     7d={used_7d}%")
 
         return {
             "rate_limits": {
-                "five_hour": {
-                    "used_percentage": used_5h,
-                    "resets_at": _parse_iso_ts(five_hour.get("resets_at", "")),
-                },
                 "seven_day": {
                     "used_percentage": used_7d,
                     "resets_at": _parse_iso_ts(seven_day.get("resets_at", "")),
@@ -418,8 +415,11 @@ def format_countdown(seconds: float) -> str:
     """Format seconds into a human-readable countdown."""
     if seconds <= 0:
         return "now"
-    hours = int(seconds // 3600)
+    days = int(seconds // 86400)
+    hours = int((seconds % 86400) // 3600)
     minutes = int((seconds % 3600) // 60)
+    if days > 0:
+        return f"{days}d{hours:02d}h"
     if hours > 0:
         return f"{hours}h{minutes:02d}m"
     return f"{minutes}m"
@@ -453,9 +453,11 @@ def format_time_ago(seconds: float) -> str:
 # Fraction of the window that must elapse before the burn-rate projection is
 # trusted at full weight. Early on, `used / elapsed` divides by a tiny number,
 # so a single burst of work extrapolates to hundreds of percent — two minutes
-# into a 5h window, 1% used projects to 150%. Ramping the weight in over the
+# into a window, a small burst projects to many times the limit. Ramping the weight in over the
 # first quarter makes the icon track actual usage early and the projection late.
 PROJECTION_RAMP = 0.25
+
+WEEK_HOURS = 7 * 24
 
 # The projection answers "will this pace exhaust the window", but a window that
 # is already nearly spent is risky at any pace — 99% used with 38m left projects
@@ -465,7 +467,7 @@ NEARLY_EXHAUSTED_PCT = 80
 
 
 def status_icon(
-    used_pct: int, resets_at: float = 0, now: float = 0, window_hours: float = 5
+    used_pct: int, resets_at: float = 0, now: float = 0, window_hours: float = WEEK_HOURS
 ) -> str:
     """Return a colored circle based on smart burn-rate projection.
 
@@ -751,17 +753,6 @@ def get_t3_threads() -> dict[str, list[dict]]:
     return result
 
 
-def compute_5h_window_start(statuses: list[dict]) -> float:
-    """Compute when the current 5h window started from rate limit data."""
-    for status in statuses:
-        rl = status.get("rate_limits", {}).get("five_hour", {})
-        resets_at = rl.get("resets_at")
-        if resets_at:
-            return resets_at - (5 * 3600)
-
-    return datetime.now(timezone.utc).timestamp() - (5 * 3600)
-
-
 class ClaudeWatchApp(rumps.App):
     def __init__(self):
         super().__init__("ClaudeWatch", title="\u2022 --", quit_button=None)
@@ -787,9 +778,6 @@ class ClaudeWatchApp(rumps.App):
             "errors": [],
         }
 
-        self.rate_5h = rumps.MenuItem(
-            "5-hour: --", callback=lambda _: webbrowser.open("https://claude.ai/settings/usage")
-        )
         self.rate_7d = rumps.MenuItem(
             "7-day: --", callback=lambda _: webbrowser.open("https://claude.ai/settings/usage")
         )
@@ -809,7 +797,6 @@ class ClaudeWatchApp(rumps.App):
         self._recent_header_key = "Recent Sessions"
 
         self.menu = [
-            self.rate_5h,
             self.rate_7d,
             self.last_updated,
             self.status_item,
@@ -937,7 +924,7 @@ class ClaudeWatchApp(rumps.App):
                 data["_session_id"] = data.get("session_id", "unknown")
                 all_statuses.append(data)
 
-        window_start = compute_5h_window_start(all_statuses)
+        window_start = now - ACTIVE_SESSION_WINDOW
         self._last_window_start = window_start
 
         # Most recent status file for account-wide rate limits
@@ -1034,7 +1021,6 @@ class ClaudeWatchApp(rumps.App):
         """Update menubar title and rate limit menu items."""
         if not latest:
             self.title = LOGIN_TITLE if self._needs_login else "\u2022 --"
-            self.rate_5h.title = "⚪ 5-hour: no data"
             self.rate_7d.title = "⚪ 7-day: no data"
             self.last_updated.title = "No status data yet"
             self._update_model_rows([], is_stale=False, now=now)
@@ -1045,22 +1031,27 @@ class ClaudeWatchApp(rumps.App):
         # Status files written by newer Claude Code versions carry an explicit
         # null here, so a plain default would hand back None.
         rl = latest.get("rate_limits") or {}
-        five_hour = rl.get("five_hour") or {}
         seven_day = rl.get("seven_day") or {}
-
-        used_5h = five_hour.get("used_percentage", 0)
-        resets_at_5h = five_hour.get("resets_at", 0)
-        countdown_5h = max(0, resets_at_5h - now)
+        per_model = latest.get("per_model") or []
 
         used_7d = seven_day.get("used_percentage", 0)
         resets_at_7d = seven_day.get("resets_at", 0)
+
+        # The menubar shows whichever weekly limit is closest to running out:
+        # a model-scoped limit often binds before the account-wide one.
+        binding = max(
+            [{"used_percentage": used_7d, "resets_at": resets_at_7d}, *per_model],
+            key=lambda limit: limit.get("used_percentage", 0),
+        )
+        used_title = binding.get("used_percentage", 0)
+        resets_at_title = binding.get("resets_at", 0)
 
         # Detect stale data (API in backoff / error state, or login expired)
         data_age = now - latest.get("_mtime", 0)
         is_stale = self._needs_login or (self._api_backoff > 0 and data_age > API_STALE_THRESHOLD)
 
         # Menubar title \u2014 show \u26aa when data is stale
-        icon = "\u26aa" if is_stale else status_icon(used_5h, resets_at_5h, now)
+        icon = "\u26aa" if is_stale else status_icon(used_title, resets_at_title, now)
 
         # Append status icon to title if Claude is having issues or session errors
         cs = self._claude_status
@@ -1069,28 +1060,20 @@ class ClaudeWatchApp(rumps.App):
         has_errors = bool(cs.get("errors"))
         alert = s_icon or ("\u26a0\ufe0f" if has_errors else "")
         suffix = f"  {alert}" if alert else ""
-        usage_title = f"{icon}{format_pct(used_5h)}% \u21bb{format_countdown(countdown_5h)}{suffix}"
+        countdown = format_countdown(max(0, resets_at_title - now))
+        usage_title = f"{icon}{format_pct(used_title)}% \u21bb{countdown}{suffix}"
         self.title = f"{LOGIN_TITLE}{suffix}" if self._needs_login else usage_title
 
         # Dropdown items
-        reset_time_5h = (
-            datetime.fromtimestamp(resets_at_5h).strftime("%-I:%M %p") if resets_at_5h else "?"
-        )
         reset_time_7d = (
             datetime.fromtimestamp(resets_at_7d).strftime("%a %-I:%M %p") if resets_at_7d else "?"
         )
 
-        icon_5h = "\u26aa" if is_stale else status_icon(used_5h, resets_at_5h, now)
-        icon_7d = (
-            "\u26aa" if is_stale else status_icon(used_7d, resets_at_7d, now, window_hours=7 * 24)
-        )
-        self.rate_5h.title = (
-            f"{icon_5h} 5-hour:  {format_pct(used_5h)}% used  (resets {reset_time_5h})"
-        )
+        icon_7d = "\u26aa" if is_stale else status_icon(used_7d, resets_at_7d, now)
         self.rate_7d.title = (
-            f"{icon_7d} 7-day:   {format_pct(used_7d)}% used  (resets {reset_time_7d})"
+            f"{icon_7d} 7-day:  {format_pct(used_7d)}% used  (resets {reset_time_7d})"
         )
-        self._update_model_rows(latest.get("per_model") or [], is_stale, now)
+        self._update_model_rows(per_model, is_stale, now)
 
         # Tooltip: show last successful fetch time
         if self._needs_login:
@@ -1107,7 +1090,6 @@ class ClaudeWatchApp(rumps.App):
         # `_menuitem` is private rumps state; guard in case it's renamed or
         # not yet attached, matching the nsstatusitem guard below.
         with contextlib.suppress(AttributeError):
-            self.rate_5h._menuitem.setToolTip_(tooltip)
             self.rate_7d._menuitem.setToolTip_(tooltip)
 
         # Status bar tooltip (hover the menubar item itself)
@@ -1145,11 +1127,7 @@ class ClaudeWatchApp(rumps.App):
 
         for index, model in enumerate(models):
             pct = model.get("used_percentage", 0)
-            icon = (
-                "⚪"
-                if is_stale
-                else status_icon(pct, model.get("resets_at", 0), now, window_hours=7 * 24)
-            )
+            icon = "⚪" if is_stale else status_icon(pct, model.get("resets_at", 0), now)
             connector = "└" if index == len(models) - 1 else "├"
             self._model_keys.append(
                 f" {connector} {icon} {model['name']}:  {format_pct(pct)}% used"
@@ -1175,7 +1153,7 @@ class ClaudeWatchApp(rumps.App):
     ):
         """Update the sessions list in the dropdown.
 
-        - "Active": has a status file OR transcript modified in current 5h window
+        - "Active": has a status file OR transcript modified in the last 5h
         - "Recent": started within last 24h but not active
         - Older than 24h with no activity: hidden
         """
