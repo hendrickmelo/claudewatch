@@ -4,15 +4,35 @@
 Run this to verify the icon/title logic works before a real incident happens.
 """
 
+import contextlib
+import io
+import json
+import math
+import shutil
 import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
 sys.path.insert(0, "src")
 
+from AppKit import NSBitmapImageRep
+
+import claudewatch.app as app
 from claudewatch.app import (
-    _is_real_error,
-    status_icon,
+    COMPACT_ICON_BORDER_WIDTH,
+    COMPACT_ICON_CORNER_RADIUS,
+    COMPACT_ICON_SIZE,
     STATUS_ICONS,
-    STATUS_LABELS,
+    ClaudeWatchApp,
+    _is_real_error,
+    fetch_claude_status,
     format_countdown,
+    projected_usage,
+    projection_note,
+    status_icon,
 )
 
 # ── Helper ────────────────────────────────────────────────────────────────────
@@ -29,89 +49,170 @@ def check(label: str, got, expected):
         print(f"       got:      {got!r}")
         print(f"       expected: {expected!r}")
 
+
 # ── 1. Error filter ───────────────────────────────────────────────────────────
 
 print("\n── Error filter (_is_real_error) ──")
-check("T3 diagnostic ignored",       _is_real_error("[ede_diagnostic] result_type=user"), False)
-check("500 error flagged",           _is_real_error("Request failed: 500 Internal Server Error"), True)
-check("overloaded flagged",          _is_real_error("Claude is currently overloaded"), True)
-check("rate_limit flagged",          _is_real_error("rate_limit exceeded"), True)
-check("timeout flagged",             _is_real_error("Request timeout after 30s"), True)
-check("connection error flagged",    _is_real_error("connection refused"), True)
-check("empty string ignored",        _is_real_error(""), False)
+check("T3 diagnostic ignored", _is_real_error("[ede_diagnostic] result_type=user"), False)
+check("500 error flagged", _is_real_error("Request failed: 500 Internal Server Error"), True)
+check("overloaded flagged", _is_real_error("Claude is currently overloaded"), True)
+check("rate_limit flagged", _is_real_error("rate_limit exceeded"), True)
+check("timeout flagged", _is_real_error("Request timeout after 30s"), True)
+check("connection error flagged", _is_real_error("connection refused"), True)
+check("empty string ignored", _is_real_error(""), False)
 
-# ── 2. Burn-rate color logic ──────────────────────────────────────────────────
+# ── 2. Fixed current-usage color logic ───────────────────────────────────────
 
-print("\n── Burn-rate color logic (status_icon) ──")
-import time
+print("\n── Fixed current-usage color logic (status_icon) ──")
+GREEN, YELLOW, ORANGE, RED = "🟢", "🟡", "🟠", "🔴"
+
+for used, expected in [
+    (0, GREEN),
+    (49, GREEN),
+    (49.9, GREEN),
+    (50, YELLOW),
+    (74, YELLOW),
+    (74.9, YELLOW),
+    (75, ORANGE),
+    (89, ORANGE),
+    (89.9, ORANGE),
+    (90, RED),
+    (100, RED),
+]:
+    check(f"{used}% → {expected}", status_icon(used), expected)
+
+# Timing must never change the current-usage classification.
 now = time.time()
-resets_in_week = now + 7 * 86400  # weekly window just started
+check("60% just after reset → yellow", status_icon(60, now + 5 * 3600, now), YELLOW)
+check("60% just before reset → yellow", status_icon(60, now + 60, now), YELLOW)
+check(
+    "60% in a 7-day window → yellow",
+    status_icon(60, now + 7 * 86400, now, window_hours=7 * 24),
+    YELLOW,
+)
 
-# At 10% used with the full week remaining → projected 10% → green
-check("10% used, full window → green",  status_icon(10, resets_in_week, now), "\U0001f7e2")
-# At 20% with the full week remaining → projected 20% → green
-check("20% used, full window → green",  status_icon(20, resets_in_week, now), "\U0001f7e2")
+# ── 3. Optional burn-rate projections ────────────────────────────────────────
 
-# Simulate 3.5d elapsed, 3.5d remaining
-resets_midpoint = now + 3.5 * 86400
-# 50% used halfway → projected 100% → orange
-check("50% used, halfway → orange", status_icon(50, resets_midpoint, now), "\U0001f7e0")
-# 30% used halfway → projected 60% → green
-check("30% used, halfway → green",  status_icon(30, resets_midpoint, now), "\U0001f7e2")
-# 40% used halfway → projected 80% → yellow
-check("40% used, halfway → yellow", status_icon(40, resets_midpoint, now), "\U0001f7e1")
-
-# Always green below 30% regardless of timing
-check("29% → always green",         status_icon(29, resets_midpoint, now), "\U0001f7e2")
-
-# Early in the window the projection is unreliable — `used / elapsed` divides by
-# a tiny number, so a single burst extrapolated over the remaining hours used to
-# force red within the first few minutes of every session.
-GREEN, YELLOW, ORANGE, RED = "\U0001f7e2", "\U0001f7e1", "\U0001f7e0", "\U0001f534"
+print("\n── Optional projection color logic ──")
 
 
-def at(used: int, elapsed_min: float, window_hours: float = 5) -> str:
-    """status_icon for `used`% at `elapsed_min` into a window."""
-    resets = now + window_hours * 3600 - elapsed_min * 60
-    return status_icon(used, resets, now, window_hours=window_hours)
+def projected_icon(used: int, elapsed_minutes: float, window_hours: float = 5) -> str:
+    resets_at = now + window_hours * 3600 - elapsed_minutes * 60
+    return status_icon(
+        used,
+        resets_at,
+        now,
+        window_hours=window_hours,
+        use_projections=True,
+    )
 
 
-check("1% at 2m in → green",    at(1, 2), GREEN)
-check("2% at 5m in → green",    at(2, 5), GREEN)
-check("5% at 15m in → green",   at(5, 15), GREEN)
-check("10% at 30m in → green",  at(10, 30), GREEN)
-# 24h into a 7-day window is the same situation on a longer scale
-check("10% at 24h into 7d → green", at(10, 24 * 60, window_hours=7 * 24), GREEN)
+check("50% halfway → orange", projected_icon(50, 150), ORANGE)
+check("40% halfway → yellow", projected_icon(40, 150), YELLOW)
+check("30% halfway → green", projected_icon(30, 150), GREEN)
+check("60% at 2h → red", projected_icon(60, 120), RED)
+check("85% near reset → orange", projected_icon(85, 290), ORANGE)
+check("90% near reset → red", projected_icon(90, 290), RED)
+check(
+    "projection off ignores timing",
+    status_icon(40, now + 2.5 * 3600, now, use_projections=False),
+    GREEN,
+)
+check(
+    "projection falls back to fixed bands without timing",
+    status_icon(60, use_projections=True),
+    YELLOW,
+)
+projected = projected_usage(50, now + 2.5 * 3600, now, 5)
+check("half-window projection reaches 100%", round(projected), 100)
+check(
+    "projection note is shown when enabled",
+    projection_note(50, now + 2.5 * 3600, now, 5, True),
+    " · projects to 100%",
+)
+check("projection note is hidden when disabled", projection_note(50, now, now, 5, False), "")
 
-# Past the ramp the projection carries full weight again
-check("60% at 2h in → red",     at(60, 120), RED)
-check("35% at 2h in → yellow",  at(35, 120), YELLOW)
-check("25% at 2h in → green",   at(25, 120), GREEN)
+# ── 4. Solid compact icon ────────────────────────────────────────────────────
 
-# A nearly-exhausted window is red no matter how little time is left to burn it
-check("99% with 38m left → red", at(99, 5 * 60 - 38), RED)
-check("90% with 10m left → red", at(90, 5 * 60 - 10), RED)
-check("85% with 10m left → orange", at(85, 5 * 60 - 10), ORANGE)
-check("79% with 10m left → yellow", at(79, 5 * 60 - 10), YELLOW)
+print("\n── Solid compact squircle ──")
+icon_maker = ClaudeWatchApp.__new__(ClaudeWatchApp)
 
-# ── 3. Status page indicator → icon ──────────────────────────────────────────
+# A filled rounded rect covers side² − (4 − π)r² of its bounding box, and the
+# half-transparent border does not clear the alpha cutoff below. At the current
+# constants that ceiling is ~82%, so a fixed 85% could never pass. Compare
+# against the ceiling instead: under it the squircle is hollow or clipped.
+# How far over it the count lands depends on the bitmap scale, since a 1x
+# render rounds every half-covered edge pixel up, so the corners are checked
+# directly: each one has to stay clear at any scale.
+_side = COMPACT_ICON_SIZE - COMPACT_ICON_BORDER_WIDTH
+FILL_CEILING = (_side**2 - (4 - math.pi) * COMPACT_ICON_CORNER_RADIUS**2) / COMPACT_ICON_SIZE**2
+
+for severity in ("green", "yellow", "orange", "red"):
+    image = icon_maker._make_compact_icon(severity)
+    rep = NSBitmapImageRep.imageRepWithData_(image.TIFFRepresentation())
+    pixel_count = rep.pixelsWide() * rep.pixelsHigh()
+    filled_pixels = sum(
+        1
+        for x in range(rep.pixelsWide())
+        for y in range(rep.pixelsHigh())
+        if rep.colorAtX_y_(x, y).alphaComponent() > 0.5
+    )
+    check(f"{severity} icon is {COMPACT_ICON_SIZE}×{COMPACT_ICON_SIZE}", image.size().width, 14)
+    check(f"{severity} icon preserves color", image.isTemplate(), False)
+    fill_ratio = filled_pixels / pixel_count
+    check(f"{severity} icon fills its squircle", fill_ratio >= FILL_CEILING * 0.97, True)
+    last_x, last_y = rep.pixelsWide() - 1, rep.pixelsHigh() - 1
+    corner_alphas = [
+        rep.colorAtX_y_(x, y).alphaComponent() for x in (0, last_x) for y in (0, last_y)
+    ]
+    check(f"{severity} icon keeps its round corners", max(corner_alphas) < 0.5, True)
+
+# Projection and compact mode are independent settings, and toggling projection
+# must preserve other keys already stored in the settings file.
+settings_test_app = ClaudeWatchApp.__new__(ClaudeWatchApp)
+settings_test_app._use_projections = False
+settings_test_app.projections_item = type("MenuItem", (), {"state": 0})()
+refreshes = []
+settings_test_app.refresh = lambda: refreshes.append(True)
+saved_settings = []
+original_load_settings = app.load_settings
+original_save_settings = app.save_settings
+app.load_settings = lambda: {"compact_mode": True}
+app.save_settings = lambda settings: saved_settings.append(settings)
+try:
+    settings_test_app.toggle_projections()
+finally:
+    app.load_settings = original_load_settings
+    app.save_settings = original_save_settings
+check("projection toggle becomes checked", settings_test_app.projections_item.state, 1)
+check(
+    "projection toggle preserves compact mode",
+    saved_settings,
+    [{"compact_mode": True, "use_projections": True}],
+)
+check("projection toggle refreshes the display", refreshes, [True])
+
+# ── 5. Status page indicator → icon ──────────────────────────────────────────
 
 print("\n── Status page indicators ──")
 for indicator, expected_icon in [
-    ("none",     ""),
-    ("minor",    "\u26a0\ufe0f"),
-    ("major",    "\U0001f534"),
+    ("none", ""),
+    ("minor", "\u26a0\ufe0f"),
+    ("major", "\U0001f534"),
     ("critical", "\U0001f6a8"),
 ]:
-    check(f"{indicator} → '{expected_icon or 'no icon'}'",
-          STATUS_ICONS.get(indicator), expected_icon)
+    check(
+        f"{indicator} → '{expected_icon or 'no icon'}'", STATUS_ICONS.get(indicator), expected_icon
+    )
 
 # ── 4. Simulate a real incident (live fetch with mock) ───────────────────────
 
 print("\n── Simulated incident display ──")
 
-def simulate_title(used_5h: int, resets_at: float, now: float,
-                   indicator: str, has_errors: bool) -> str:
+
+def simulate_title(
+    used_5h: int, resets_at: float, now: float, indicator: str, has_errors: bool
+) -> str:
     """Reproduce the title-building logic from _update_rate_limits."""
     icon = status_icon(used_5h, resets_at, now)
     countdown = format_countdown(max(0, resets_at - now))
@@ -119,6 +220,7 @@ def simulate_title(used_5h: int, resets_at: float, now: float,
     alert = s_icon or ("\u26a0\ufe0f" if has_errors else "")
     suffix = f"  {alert}" if alert else ""
     return f"{icon}{used_5h}% \u21bb{countdown}{suffix}"
+
 
 resets_at = now + 2 * 3600
 
@@ -131,7 +233,6 @@ print(f"  Err:      {simulate_title(20, resets_at, now, 'none', True)}")
 # ── 5. Live status page fetch ─────────────────────────────────────────────────
 
 print("\n── Live status fetch ──")
-from claudewatch.app import fetch_claude_status
 result = fetch_claude_status()
 print(f"  indicator:  {result['indicator']}")
 print(f"  description: {result['description']}")
@@ -146,8 +247,6 @@ if result["errors"]:
 # refresh — only 429 did — so the menubar showed stale 0% / "resets ?" forever.
 
 print("\n── OAuth refresh on 401 (fetch_oauth_usage) ──")
-import claudewatch.app as app
-
 GOOD = {
     "rate_limits": {"seven_day": {"used_percentage": 12, "resets_at": 0}},
     "_source": "oauth_api",
@@ -220,9 +319,6 @@ res, _ = run_fetch(["unauthorized"], "rejected")
 check("401 + rejected refresh → needs_login", res, "needs_login")
 
 print("\n── Refresh rejection vs transient failure (_refresh_oauth_token) ──")
-import io
-import urllib.error
-import urllib.request
 
 
 def run_refresh(creds, error=None):
@@ -275,11 +371,6 @@ check("token appears after none → recovered", run_recovered(DEFAULT_CREDS, Non
 # ── 6. Transcript path cache ──────────────────────────────────────────────────
 
 print("\n── Transcript path cache (get_transcript_info) ──")
-
-import json
-import shutil
-import tempfile
-from pathlib import Path
 
 
 def _write_transcript(path: Path, model: str):
@@ -349,14 +440,14 @@ def run_vanished_transcript():
     return _with_temp_projects(body)
 
 
-check("transcript re-resolved after a worktree move", run_moved_transcript(), ("model-a", "model-a"))
+check(
+    "transcript re-resolved after a worktree move", run_moved_transcript(), ("model-a", "model-a")
+)
 check("vanished transcript drops only its own session", run_vanished_transcript(), ["sid-good"])
 
 # ── 7. Refresh failure visibility ─────────────────────────────────────────────
 
 print("\n── Refresh failure visibility (refresh) ──")
-
-import contextlib
 
 HEALTHY_TITLE = "🟢11% ↻4h19m"
 THRESHOLD = app.REFRESH_FAILURE_THRESHOLD
@@ -411,7 +502,9 @@ gone = FileNotFoundError(2, "No such file or directory", "/gone/x.jsonl")
 
 titles, last_updated, logs, tb_count, inst = _drive([gone] * THRESHOLD)
 
-check("failures below threshold leave the title alone", titles[:-1], [HEALTHY_TITLE] * (THRESHOLD - 1))
+check(
+    "failures below threshold leave the title alone", titles[:-1], [HEALTHY_TITLE] * (THRESHOLD - 1)
+)
 check("threshold trips the stalled title", titles[-1], app.STALLED_TITLE)
 check("stalled line names the error", "FileNotFoundError" in last_updated, True)
 check("stalled line says when it stopped", "Updates stopped" in last_updated, True)
