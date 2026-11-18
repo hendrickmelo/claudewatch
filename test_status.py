@@ -140,8 +140,10 @@ icon_maker = ClaudeWatchApp.__new__(ClaudeWatchApp)
 # A filled rounded rect covers side² − (4 − π)r² of its bounding box, and the
 # half-transparent border does not clear the alpha cutoff below. At the current
 # constants that ceiling is ~82%, so a fixed 85% could never pass. Compare
-# against the ceiling instead: under it the squircle is hollow or clipped, well
-# over it the corners have stopped being round.
+# against the ceiling instead: under it the squircle is hollow or clipped.
+# How far over it the count lands depends on the bitmap scale, since a 1x
+# render rounds every half-covered edge pixel up, so the corners are checked
+# directly: each one has to stay clear at any scale.
 _side = COMPACT_ICON_SIZE - COMPACT_ICON_BORDER_WIDTH
 FILL_CEILING = (_side**2 - (4 - math.pi) * COMPACT_ICON_CORNER_RADIUS**2) / COMPACT_ICON_SIZE**2
 
@@ -159,7 +161,11 @@ for severity in ("green", "yellow", "orange", "red"):
     check(f"{severity} icon preserves color", image.isTemplate(), False)
     fill_ratio = filled_pixels / pixel_count
     check(f"{severity} icon fills its squircle", fill_ratio >= FILL_CEILING * 0.97, True)
-    check(f"{severity} icon keeps its round corners", fill_ratio <= FILL_CEILING * 1.05, True)
+    last_x, last_y = rep.pixelsWide() - 1, rep.pixelsHigh() - 1
+    corner_alphas = [
+        rep.colorAtX_y_(x, y).alphaComponent() for x in (0, last_x) for y in (0, last_y)
+    ]
+    check(f"{severity} icon keeps its round corners", max(corner_alphas) < 0.5, True)
 
 # Projection and compact mode are independent settings, and toggling projection
 # must preserve other keys already stored in the settings file.
